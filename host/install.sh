@@ -16,6 +16,22 @@ for command in python3 node npm nmcli systemctl; do
     }
 done
 
+python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' || {
+    echo "ClawPi 需要 Python >= 3.10" >&2
+    exit 1
+}
+
+if ! python3 -c 'import ensurepip' >/dev/null 2>&1; then
+    if command -v apt-get >/dev/null 2>&1; then
+        PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+        apt-get update
+        apt-get install -y "python${PYTHON_VERSION}-venv" || apt-get install -y python3-venv
+    else
+        echo "缺少 Python venv/ensurepip，请先安装当前 Python 版本的 venv 包" >&2
+        exit 1
+    fi
+fi
+
 node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 22 || (major === 22 && minor >= 19) ? 0 : 1)' || {
     echo "Pi 0.84.2 需要 Node.js >= 22.19.0" >&2
     exit 1
@@ -29,7 +45,7 @@ install -d -m 0750 /etc/clawpi
 install -m 0644 "$SCRIPT_DIR/daemon.py" /opt/clawpi/daemon.py
 install -m 0644 "$SCRIPT_DIR/simulator.py" /opt/clawpi/simulator.py
 install -m 0644 "$SCRIPT_DIR/requirements.txt" /opt/clawpi/requirements.txt
-python3 -m venv /opt/clawpi/venv
+python3 -m venv --clear /opt/clawpi/venv
 /opt/clawpi/venv/bin/pip install --disable-pip-version-check --no-cache-dir -r /opt/clawpi/requirements.txt
 npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@$PI_VERSION"
 

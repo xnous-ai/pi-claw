@@ -4,7 +4,7 @@ AI 主机侧程序。`daemon.py` 是 Linux 真机守护程序，`simulator.py` �
 
 ## 真机要求
 
-- 64 位 Debian / Raspberry Pi OS，Python 3.11+
+- 64 位 Debian / Ubuntu / Raspberry Pi OS，Python 3.10+
 - NetworkManager 与 `nmcli`
 - Node.js 22.19+
 - Pi `@earendil-works/pi-coding-agent@0.84.2`
@@ -18,6 +18,8 @@ sudo nano /etc/clawpi/clawpi.env
 sudo systemctl start clawpi
 sudo journalctl -u clawpi -f
 ```
+
+在 Debian/Ubuntu 上，如果系统缺少当前 Python 版本的 `venv` 包，安装脚本会通过 `apt-get` 自动安装。
 
 至少配置 `CLAWPI_SERVER_URL` 和每台机器唯一的 `CLAWPI_SETUP_PASSWORD`。API Key 由用户在 App 中配置，不需要预装到主机镜像。安装脚本只启用服务，不会在配置完成前启动。
 

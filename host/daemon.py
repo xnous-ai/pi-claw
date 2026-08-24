@@ -456,7 +456,8 @@ async def handle_chat(websocket, message: dict, agent: PiRpcAgent, timeout: int)
     try:
         if not request_id or not message.get("conversationId") or not message.get("text"):
             raise ValueError("聊天请求无效")
-        async with asyncio.timeout(timeout):
+
+        async def forward_response() -> None:
             async for delta in agent.stream(str(message["conversationId"]), str(message["text"])):
                 await websocket.send(
                     json.dumps(
@@ -464,6 +465,8 @@ async def handle_chat(websocket, message: dict, agent: PiRpcAgent, timeout: int)
                         ensure_ascii=False,
                     )
                 )
+
+        await asyncio.wait_for(forward_response(), timeout)
         await websocket.send(
             json.dumps(
                 {
