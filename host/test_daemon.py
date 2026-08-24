@@ -19,9 +19,11 @@ from daemon import (
     handle_agent_configuration,
     load_agent_config,
     message_text,
+    run_nmcli,
     run_host,
     save_agent_config,
     scan_wifi_networks,
+    start_hotspot,
 )
 
 
@@ -156,6 +158,17 @@ class ProvisioningTest(unittest.TestCase):
                 "daemon.run_nmcli", return_value=CompletedProcess([], 0, state, "")
             ):
                 self.assertEqual(has_network_connection(), expected)
+
+    def test_rejects_invalid_hotspot_password(self) -> None:
+        with self.assertRaisesRegex(ValueError, "8 到 63"):
+            start_hotspot("wlan0", "clawpi-setup", "ClawPi-Test", "123456")
+
+    def test_nmcli_error_includes_stderr(self) -> None:
+        failed = CompletedProcess([], 1, "", "Device 'wlan0' is not available")
+        with patch("daemon.subprocess.run", return_value=failed), self.assertRaisesRegex(
+            RuntimeError, "wlan0.*not available"
+        ):
+            run_nmcli("device", "wifi", "hotspot")
 
     def test_host_returns_when_network_is_lost(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

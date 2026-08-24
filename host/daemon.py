@@ -43,14 +43,18 @@ def machine_serial() -> str:
 
 
 def run_nmcli(*arguments: str, timeout: int = 60, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(
+    result = subprocess.run(
         ["nmcli", *arguments],
-        check=check,
+        check=False,
         capture_output=True,
         env={**os.environ, "LANG": "C", "LC_ALL": "C"},
         text=True,
         timeout=timeout,
     )
+    if check and result.returncode:
+        detail = result.stderr.strip() or result.stdout.strip() or f"退出码 {result.returncode}"
+        raise RuntimeError(f"nmcli 执行失败：{detail}")
+    return result
 
 
 def has_network_connection() -> bool:
@@ -131,6 +135,8 @@ def scan_wifi_networks(interface: str) -> list[dict]:
 
 
 def start_hotspot(interface: str, connection: str, ssid: str, password: str) -> None:
+    if not 8 <= len(password) <= 63:
+        raise ValueError("CLAWPI_SETUP_PASSWORD 必须为 8 到 63 个字符")
     run_nmcli("connection", "delete", connection, check=False)
     run_nmcli(
         "device",
