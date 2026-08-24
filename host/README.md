@@ -23,7 +23,7 @@ sudo journalctl -u clawpi -f
 
 至少配置 `CLAWPI_SERVER_URL` 和每台机器唯一的 `CLAWPI_SETUP_PASSWORD`。API Key 由用户在 App 中配置，不需要预装到主机镜像。安装脚本只启用服务，不会在配置完成前启动。
 
-首次启动没有 `/var/lib/clawpi/credentials.json`，或者 NetworkManager 未检测到可用网络时，主机都会建立 `ClawPi-序列号` 热点并监听 `192.168.4.1:8090`。运行过程中掉网也会让守护进程退出并由 systemd 自动重启进入热点模式。App 通过 `GET /wifi-networks` 读取主机无线网卡扫描到的附近网络，用户选择 SSID 并填写密码。提交后主机关闭热点、连接家庭网络、认领设备并上线。随后 App 通过 FastAPI 将模型配置实时转发给主机，主机保存到权限为 `0600` 的 `/var/lib/clawpi/agent.json`。
+只有 NetworkManager 未检测到网络连接时，主机才会建立 `ClawPi-序列号` 热点并监听 `192.168.4.1:8090`。主机首次启动时如果已经联网，不会切换无线网卡，而是在当前局域网的 `8090` 端口等待绑定。运行过程中掉网会让守护进程退出并由 systemd 自动重启进入热点模式。App 通过 `GET /wifi-networks` 读取主机无线网卡扫描到的附近网络，用户选择 SSID 并填写密码。提交后主机关闭热点、连接家庭网络、认领设备并上线。随后 App 通过 FastAPI 将模型配置实时转发给主机，主机保存到权限为 `0600` 的 `/var/lib/clawpi/agent.json`。
 
 部分无线网卡或驱动不支持在热点模式下主动扫描；此时接口会尝试使用 NetworkManager 缓存，仍然失败时 App 会自动提供手动输入 SSID 的入口。
 

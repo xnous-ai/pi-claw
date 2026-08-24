@@ -57,21 +57,28 @@ def run_nmcli(*arguments: str, timeout: int = 60, check: bool = True) -> subproc
     return result
 
 
-def has_network_connection() -> bool:
+def has_network_connection(hotspot_connection: str = "clawpi-setup") -> bool:
     result = run_nmcli(
         "--terse",
+        "--escape",
+        "yes",
         "--fields",
-        "STATE",
-        "general",
+        "NAME,TYPE",
+        "connection",
+        "show",
+        "--active",
         timeout=10,
         check=False,
     )
-    state = result.stdout.strip().lower()
-    return result.returncode == 0 and state in {
-        "connected",
-        "connected (global)",
-        "connected (site only)",
-    }
+    if result.returncode:
+        return False
+    usable_types = {"802-11-wireless", "802-3-ethernet", "wifi", "ethernet", "gsm", "cdma"}
+    return any(
+        len(fields := split_nmcli_terse(line)) == 2
+        and fields[0] != hotspot_connection
+        and fields[1] in usable_types
+        for line in result.stdout.splitlines()
+    )
 
 
 def split_nmcli_terse(line: str) -> list[str]:
@@ -162,10 +169,15 @@ def start_hotspot(interface: str, connection: str, ssid: str, password: str) -> 
         "ipv6.method",
         "disabled",
         "connection.autoconnect",
-        "yes",
+        "no",
     )
     run_nmcli("connection", "down", connection)
     run_nmcli("connection", "up", connection)
+
+
+def stop_hotspot(connection: str) -> None:
+    run_nmcli("connection", "modify", connection, "connection.autoconnect", "no", check=False)
+    run_nmcli("connection", "down", connection, check=False)
 
 
 def connect_wifi(interface: str, hotspot_connection: str, ssid: str, password: str) -> None:
@@ -619,12 +631,17 @@ def main() -> None:
         credentials = json.loads(args.credentials.read_text(encoding="utf-8"))
         args.server = credentials.get("server", args.server)
 
-    if credentials is None or not has_network_connection():
+    network_connected = has_network_connection(args.hotspot_connection)
+    if network_connected:
+        stop_hotspot(args.hotspot_connection)
+    if credentials is None or not network_connected:
         if not args.server:
             raise SystemExit("首次启动必须配置 CLAWPI_SERVER_URL")
-        if credentials is not None:
+        if not network_connected:
             print("未检测到可用网络，进入热点配网模式", flush=True)
-        if not args.skip_hotspot:
+        else:
+            print("主机已联网，等待 App 通过当前局域网完成绑定", flush=True)
+        if not network_connected and not args.skip_hotspot:
             ssid = f"ClawPi-{args.serial[-6:]}"
             start_hotspot(args.wifi_interface, args.hotspot_connection, ssid, args.setup_password)
             print(f"配网热点已启动：{ssid}", flush=True)
@@ -636,7 +653,7 @@ def main() -> None:
             args.wifi_interface,
         )
         time.sleep(0.5)
-        if not args.skip_hotspot:
+        if not network_connected and not args.skip_hotspot:
             connect_wifi(
                 args.wifi_interface,
                 args.hotspot_connection,

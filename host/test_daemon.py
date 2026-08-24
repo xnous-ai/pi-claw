@@ -24,6 +24,7 @@ from daemon import (
     save_agent_config,
     scan_wifi_networks,
     start_hotspot,
+    stop_hotspot,
 )
 
 
@@ -147,17 +148,23 @@ class ProvisioningTest(unittest.TestCase):
             ],
         )
 
-    def test_detects_only_usable_network_states(self) -> None:
-        for state, expected in (
-            ("connected (global)\n", True),
-            ("connected (site only)\n", True),
-            ("connected (local only)\n", False),
-            ("disconnected\n", False),
+    def test_detects_network_without_counting_setup_hotspot(self) -> None:
+        for connections, expected in (
+            ("Home WiFi:802-11-wireless\n", True),
+            ("Wired connection 1:802-3-ethernet\n", True),
+            ("clawpi-setup:802-11-wireless\n", False),
+            ("lo:loopback\ndocker0:bridge\n", False),
         ):
-            with self.subTest(state=state), patch(
-                "daemon.run_nmcli", return_value=CompletedProcess([], 0, state, "")
+            with self.subTest(connections=connections), patch(
+                "daemon.run_nmcli", return_value=CompletedProcess([], 0, connections, "")
             ):
                 self.assertEqual(has_network_connection(), expected)
+
+    def test_stops_existing_hotspot_without_failing(self) -> None:
+        with patch("daemon.run_nmcli") as nmcli:
+            stop_hotspot("clawpi-setup")
+        self.assertEqual(nmcli.call_count, 2)
+        self.assertTrue(all(call.kwargs["check"] is False for call in nmcli.call_args_list))
 
     def test_rejects_invalid_hotspot_password(self) -> None:
         with self.assertRaisesRegex(ValueError, "8 到 63"):
