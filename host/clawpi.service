@@ -6,7 +6,7 @@ Wants=NetworkManager.service network-online.target
 [Service]
 Type=simple
 User=root
-Group=root
+Group=clawpi
 EnvironmentFile=/etc/clawpi/clawpi.env
 WorkingDirectory=/var/lib/clawpi/workspace
 ExecStart=/opt/clawpi/venv/bin/python -u /opt/clawpi/daemon.py
