@@ -41,6 +41,7 @@ id clawpi >/dev/null 2>&1 || useradd --system --home-dir /var/lib/clawpi --shell
 install -d -m 0755 /opt/clawpi
 install -d -o clawpi -g clawpi -m 0750 /var/lib/clawpi /var/lib/clawpi/workspace /var/lib/clawpi/sessions /var/lib/clawpi/pi-config
 install -d -m 0750 /etc/clawpi
+chown -R clawpi:clawpi /var/lib/clawpi/workspace /var/lib/clawpi/sessions /var/lib/clawpi/pi-config
 
 install -m 0644 "$SCRIPT_DIR/daemon.py" /opt/clawpi/daemon.py
 install -m 0644 "$SCRIPT_DIR/simulator.py" /opt/clawpi/simulator.py
