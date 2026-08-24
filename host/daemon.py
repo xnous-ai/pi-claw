@@ -57,28 +57,18 @@ def run_nmcli(*arguments: str, timeout: int = 60, check: bool = True) -> subproc
     return result
 
 
-def has_network_connection(hotspot_connection: str = "clawpi-setup") -> bool:
-    result = run_nmcli(
-        "--terse",
-        "--escape",
-        "yes",
-        "--fields",
-        "NAME,TYPE",
-        "connection",
-        "show",
-        "--active",
-        timeout=10,
-        check=False,
-    )
-    if result.returncode:
-        return False
-    usable_types = {"802-11-wireless", "802-3-ethernet", "wifi", "ethernet", "gsm", "cdma"}
-    return any(
-        len(fields := split_nmcli_terse(line)) == 2
-        and fields[0] != hotspot_connection
-        and fields[1] in usable_types
-        for line in result.stdout.splitlines()
-    )
+def has_network_connection() -> bool:
+    for family in ("-4", "-6"):
+        result = subprocess.run(
+            ["ip", family, "route", "show", "default"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return True
+    return False
 
 
 def split_nmcli_terse(line: str) -> list[str]:
@@ -631,7 +621,7 @@ def main() -> None:
         credentials = json.loads(args.credentials.read_text(encoding="utf-8"))
         args.server = credentials.get("server", args.server)
 
-    network_connected = has_network_connection(args.hotspot_connection)
+    network_connected = has_network_connection()
     if network_connected:
         stop_hotspot(args.hotspot_connection)
     if credentials is None or not network_connected:

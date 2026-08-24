@@ -148,16 +148,16 @@ class ProvisioningTest(unittest.TestCase):
             ],
         )
 
-    def test_detects_network_without_counting_setup_hotspot(self) -> None:
-        for connections, expected in (
-            ("Home WiFi:802-11-wireless\n", True),
-            ("Wired connection 1:802-3-ethernet\n", True),
-            ("clawpi-setup:802-11-wireless\n", False),
-            ("lo:loopback\ndocker0:bridge\n", False),
+    def test_detects_ipv4_or_ipv6_default_route(self) -> None:
+        no_route = CompletedProcess([], 0, "", "")
+        ipv4_route = CompletedProcess([], 0, "default via 192.168.1.1 dev eth0\n", "")
+        ipv6_route = CompletedProcess([], 0, "default via fe80::1 dev eth0\n", "")
+        for results, expected in (
+            ([ipv4_route], True),
+            ([no_route, ipv6_route], True),
+            ([no_route, no_route], False),
         ):
-            with self.subTest(connections=connections), patch(
-                "daemon.run_nmcli", return_value=CompletedProcess([], 0, connections, "")
-            ):
+            with self.subTest(expected=expected), patch("daemon.subprocess.run", side_effect=results):
                 self.assertEqual(has_network_connection(), expected)
 
     def test_stops_existing_hotspot_without_failing(self) -> None:

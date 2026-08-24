@@ -9,7 +9,7 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-for command in python3 node npm nmcli systemctl; do
+for command in python3 node npm nmcli ip systemctl; do
     command -v "$command" >/dev/null 2>&1 || {
         echo "缺少依赖：$command" >&2
         exit 1
