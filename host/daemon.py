@@ -58,17 +58,28 @@ def run_nmcli(*arguments: str, timeout: int = 60, check: bool = True) -> subproc
 
 
 def has_network_connection() -> bool:
-    for family in ("-4", "-6"):
-        result = subprocess.run(
-            ["ip", family, "route", "show", "default"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return True
-    return False
+    try:
+        ipv4_routes = Path("/proc/net/route").read_text(encoding="ascii").splitlines()[1:]
+    except OSError:
+        ipv4_routes = []
+    if any(
+        len(fields := line.split()) >= 8
+        and fields[1] == "00000000"
+        and fields[7] == "00000000"
+        for line in ipv4_routes
+    ):
+        return True
+
+    try:
+        ipv6_routes = Path("/proc/net/ipv6_route").read_text(encoding="ascii").splitlines()
+    except OSError:
+        ipv6_routes = []
+    return any(
+        len(fields := line.split()) >= 10
+        and fields[0] == "0" * 32
+        and fields[1] == "00"
+        for line in ipv6_routes
+    )
 
 
 def split_nmcli_terse(line: str) -> list[str]:

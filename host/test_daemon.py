@@ -149,15 +149,17 @@ class ProvisioningTest(unittest.TestCase):
         )
 
     def test_detects_ipv4_or_ipv6_default_route(self) -> None:
-        no_route = CompletedProcess([], 0, "", "")
-        ipv4_route = CompletedProcess([], 0, "default via 192.168.1.1 dev eth0\n", "")
-        ipv6_route = CompletedProcess([], 0, "default via fe80::1 dev eth0\n", "")
-        for results, expected in (
+        header = "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\n"
+        ipv4_route = header + "wlp1s0 00000000 0132A8C0 0003 0 0 600 00000000 0 0 0\n"
+        ipv6_route = f"{'0' * 32} 00 {'0' * 32} 00 {'0' * 32} 00000400 0 0 00000003 wlp1s0\n"
+        for routes, expected in (
             ([ipv4_route], True),
-            ([no_route, ipv6_route], True),
-            ([no_route, no_route], False),
+            ([header, ipv6_route], True),
+            ([header, ""], False),
         ):
-            with self.subTest(expected=expected), patch("daemon.subprocess.run", side_effect=results):
+            with self.subTest(expected=expected), patch(
+                "daemon.Path.read_text", side_effect=routes
+            ):
                 self.assertEqual(has_network_connection(), expected)
 
     def test_stops_existing_hotspot_without_failing(self) -> None:
