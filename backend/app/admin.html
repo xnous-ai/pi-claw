@@ -83,10 +83,11 @@
   <div id="message" class="message hidden"></div>
   <script>
     const state={key:sessionStorage.getItem('clawpi.admin.key')||'',page:'overview',users:[],devices:[],capabilities:[]};
+    const apiRoot=location.pathname.replace(/\/admin\/?$/,'');
     const $=id=>document.getElementById(id); const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const date=value=>value?new Intl.DateTimeFormat('zh-CN',{dateStyle:'medium',timeStyle:'short'}).format(new Date(value)):'-';
     function notify(text,error=false){const el=$('message');el.textContent=text;el.className=`message${error?' error':''}`;setTimeout(()=>el.classList.add('hidden'),3000)}
-    async function api(path,options={}){const response=await fetch(path,{...options,headers:{'X-Admin-Key':state.key,...(options.body instanceof ArrayBuffer?{'Content-Type':'application/zip'}:{'Content-Type':'application/json'}),...options.headers}});const body=await response.json().catch(()=>null);if(!response.ok)throw new Error(Array.isArray(body?.detail)?body.detail.map(x=>x.msg).join('；'):body?.detail||`请求失败（${response.status}）`);return body}
+    async function api(path,options={}){const response=await fetch(apiRoot+path,{...options,headers:{'X-Admin-Key':state.key,...(options.body instanceof ArrayBuffer?{'Content-Type':'application/zip'}:{'Content-Type':'application/json'}),...options.headers}});const body=await response.json().catch(()=>null);if(!response.ok)throw new Error(Array.isArray(body?.detail)?body.detail.map(x=>x.msg).join('；'):body?.detail||`请求失败（${response.status}）`);return body}
     function showApp(){state.key=sessionStorage.getItem('clawpi.admin.key')||'';$('login').classList.add('hidden');$('app').classList.remove('hidden');loadPage()}
     async function loadPage(){try{if(state.page==='overview')await loadOverview();if(state.page==='users')await loadUsers();if(state.page==='devices')await loadDevices();if(state.page==='capabilities')await loadCapabilities()}catch(error){notify(error.message,true);if(error.message.includes('管理密钥'))logout()}}
     async function loadOverview(){const x=await api('/v1/admin/overview');$('metrics').innerHTML=[['账号总数',x.users],['启用账号',x.activeUsers],['主机总数',x.devices],['在线主机',x.onlineDevices],['能力总数',x.capabilities],['已发布能力',x.publishedCapabilities]].map(([a,b])=>`<div class="metric"><span>${a}</span><strong>${b}</strong></div>`).join('')}
