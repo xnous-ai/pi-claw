@@ -166,7 +166,7 @@ class BackendFlowTest(unittest.TestCase):
                 model_request = json.loads(await websocket.recv())
                 self.assertEqual(model_request["type"], "agent.configure")
                 self.assertIsNone(model_request["apiKey"])
-                self.assertEqual(model_request["model"], "gpt-next")
+                self.assertEqual(model_request["model"], "deepseek-next")
                 await websocket.send(
                     json.dumps(
                         {
@@ -185,16 +185,16 @@ class BackendFlowTest(unittest.TestCase):
                             "type": "agent.config",
                             "requestId": read_request["requestId"],
                             "configured": True,
-                            "provider": "openai",
-                            "model": "gpt-next",
+                            "provider": "deepseek",
+                            "model": "deepseek-next",
                             "providers": [
                                 {"id": "openai", "label": "OpenAI"},
                                 {"id": "deepseek", "label": "DeepSeek"},
                             ],
                             "models": [
                                 {
-                                    "id": "gpt-next",
-                                    "name": "GPT Next",
+                                    "id": "deepseek-next",
+                                    "name": "DeepSeek Next",
                                     "reasoning": True,
                                     "contextWindow": 200000,
                                 }
@@ -235,20 +235,20 @@ class BackendFlowTest(unittest.TestCase):
         status, configured = http_json(
             f"{self.base}/v1/devices/{device['id']}/agent-config",
             "POST",
-            {"provider": "openai", "model": "gpt-test", "apiKey": "sk-test-key"},
+            {"provider": "deepseek", "model": "deepseek-test", "apiKey": "sk-test-key"},
             token,
         )
         self.assertEqual(status, 200)
-        self.assertEqual(configured, {"provider": "openai", "model": "gpt-test"})
+        self.assertEqual(configured, {"provider": "deepseek", "model": "deepseek-test"})
 
         status, configured = http_json(
             f"{self.base}/v1/devices/{device['id']}/agent-config",
             "POST",
-            {"provider": "openai", "model": "gpt-next"},
+            {"provider": "deepseek", "model": "deepseek-next"},
             token,
         )
         self.assertEqual(status, 200)
-        self.assertEqual(configured, {"provider": "openai", "model": "gpt-next"})
+        self.assertEqual(configured, {"provider": "deepseek", "model": "deepseek-next"})
 
         status, config = http_json(
             f"{self.base}/v1/devices/{device['id']}/agent-config",
@@ -259,16 +259,16 @@ class BackendFlowTest(unittest.TestCase):
             config,
             {
                 "configured": True,
-                "provider": "openai",
-                "model": "gpt-next",
+                "provider": "deepseek",
+                "model": "deepseek-next",
                 "providers": [
                     {"id": "openai", "label": "OpenAI"},
                     {"id": "deepseek", "label": "DeepSeek"},
                 ],
                 "models": [
                     {
-                        "id": "gpt-next",
-                        "name": "GPT Next",
+                        "id": "deepseek-next",
+                        "name": "DeepSeek Next",
                         "reasoning": True,
                         "contextWindow": 200000,
                     }

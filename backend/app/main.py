@@ -2,7 +2,6 @@ import asyncio
 import os
 import re
 from datetime import timedelta
-from typing import Literal
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
@@ -84,7 +83,7 @@ class MessageInput(BaseModel):
 
 
 class AgentConfigInput(BaseModel):
-    provider: Literal["openai", "anthropic", "google", "openrouter"]
+    provider: str = Field(min_length=1, max_length=80, pattern=r"^[a-z0-9][a-z0-9._-]*$")
     model: str = Field(default="", max_length=200)
     apiKey: str | None = Field(default=None, min_length=8, max_length=4096)
 
