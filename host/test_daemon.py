@@ -25,6 +25,7 @@ from daemon import (
     scan_wifi_networks,
     start_hotspot,
     stop_hotspot,
+    wait_for_setup,
 )
 
 
@@ -152,9 +153,13 @@ class ProvisioningTest(unittest.TestCase):
         header = "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\n"
         ipv4_route = header + "wlp1s0 00000000 0132A8C0 0003 0 0 600 00000000 0 0 0\n"
         ipv6_route = f"{'0' * 32} 00 {'0' * 32} 00 {'0' * 32} 00000400 0 0 00000003 wlp1s0\n"
+        unreachable_ipv6 = (
+            f"{'0' * 32} 00 {'0' * 32} 00 {'0' * 32} 00000000 1 0 00200200 lo\n"
+        )
         for routes, expected in (
             ([ipv4_route], True),
             ([header, ipv6_route], True),
+            ([header, unreachable_ipv6], False),
             ([header, ""], False),
         ):
             with self.subTest(expected=expected), patch(
@@ -167,6 +172,13 @@ class ProvisioningTest(unittest.TestCase):
             stop_hotspot("clawpi-setup")
         self.assertEqual(nmcli.call_count, 2)
         self.assertTrue(all(call.kwargs["check"] is False for call in nmcli.call_args_list))
+
+    def test_stops_waiting_for_setup_when_network_is_lost(self) -> None:
+        with patch("daemon.has_network_connection", return_value=False):
+            setup = wait_for_setup(
+                "127.0.0.1", 0, "https://cloud.local", False, "wlp1s0", monitor_network=True
+            )
+        self.assertIsNone(setup)
 
     def test_rejects_invalid_hotspot_password(self) -> None:
         with self.assertRaisesRegex(ValueError, "8 到 63"):

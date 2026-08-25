@@ -66,6 +66,8 @@ def has_network_connection() -> bool:
         len(fields := line.split()) >= 8
         and fields[1] == "00000000"
         and fields[7] == "00000000"
+        and int(fields[3], 16) & 1
+        and fields[0] != "lo"
         for line in ipv4_routes
     ):
         return True
@@ -78,6 +80,8 @@ def has_network_connection() -> bool:
         len(fields := line.split()) >= 10
         and fields[0] == "0" * 32
         and fields[1] == "00"
+        and int(fields[8], 16) & 1
+        and fields[9] != "lo"
         for line in ipv6_routes
     )
 
@@ -283,15 +287,39 @@ class ProvisioningHandler(BaseHTTPRequestHandler):
 
 
 def wait_for_setup(
-    host: str, port: int, cloud_url: str, allow_http: bool, wifi_interface: str
-) -> dict:
+    host: str,
+    port: int,
+    cloud_url: str,
+    allow_http: bool,
+    wifi_interface: str,
+    monitor_network: bool = False,
+) -> dict | None:
     server = ProvisioningServer((host, port), cloud_url, allow_http, wifi_interface)
+    network_lost = threading.Event()
+
+    def stop_when_offline() -> None:
+        while not server.completed:
+            time.sleep(2)
+            if not has_network_connection():
+                network_lost.set()
+                server.shutdown()
+                return
+
+    monitor = None
+    if monitor_network:
+        monitor = threading.Thread(target=stop_when_offline, daemon=True)
+        monitor.start()
     print(f"等待 App 配网：http://{host}:{port}/provision", flush=True)
     try:
         server.serve_forever()
+        if network_lost.is_set():
+            return None
         return server.result.get_nowait()
     finally:
+        server.completed = True
         server.server_close()
+        if monitor:
+            monitor.join(timeout=3)
 
 
 def save_agent_config(path: Path, config: dict, owner: str = "") -> dict:
@@ -652,7 +680,11 @@ def main() -> None:
             args.server,
             args.allow_http,
             args.wifi_interface,
+            monitor_network=network_connected,
         )
+        if setup is None:
+            print("等待绑定期间网络断开，重启后进入热点配网模式", flush=True)
+            return
         time.sleep(0.5)
         if not network_connected and not args.skip_hotspot:
             connect_wifi(
