@@ -22,6 +22,7 @@ import {
   getDevice,
   isDemoMode,
   login,
+  prepareDeviceProvisioning,
   register,
   refreshHostWifiNetworks,
   releaseDevice,
@@ -32,6 +33,7 @@ import {
   type AuthSession,
   type Conversation,
   type Device,
+  type DeviceProvisioning,
   type WifiNetwork,
 } from './src/api';
 import {
@@ -365,6 +367,7 @@ function AddDeviceScreen({
   const [model, setModel] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [pendingDevice, setPendingDevice] = useState<Device | null>(null);
+  const [provisioning, setProvisioning] = useState<DeviceProvisioning | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -375,11 +378,19 @@ function AddDeviceScreen({
     { id: 'openrouter', label: 'OpenRouter' },
   ];
 
-  async function openWifiSettings() {
+  async function prepareAndOpenWifiSettings() {
+    if (!hostName.trim()) return setError('请输入主机名称');
+    setError('');
+    setLoading(true);
     try {
+      const prepared = await prepareDeviceProvisioning(session.token, hostName.trim());
+      setProvisioning(prepared);
       await Linking.sendIntent('android.settings.WIFI_SETTINGS');
-    } catch {
-      Alert.alert('无法打开 Wi-Fi 设置', '请从系统设置中连接 ClawPi 开头的主机热点。');
+    } catch (prepareError) {
+      setProvisioning(null);
+      setError(errorMessage(prepareError));
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -414,13 +425,17 @@ function AddDeviceScreen({
   }
 
   function openNetworkStep() {
+    if (!provisioning || Date.parse(provisioning.expiresAt) <= Date.now()) {
+      setError('请保持手机联网，先准备绑定并打开 Wi-Fi 设置');
+      return;
+    }
     setError('');
     setStep('network');
     void scanWifi();
   }
 
   async function submitNetwork() {
-    if (!hostName.trim()) return setError('请输入主机名称');
+    if (!provisioning) return setError('绑定准备已失效，请返回上一步重新准备');
     if (!wifiName.trim()) return setError('请输入家庭 Wi-Fi 名称');
     if (wifiPassword.length < 8) return setError('Wi-Fi 密码至少需要 8 位');
     setError('');
@@ -428,7 +443,7 @@ function AddDeviceScreen({
     try {
       const device = await configureDeviceNetwork(
         session.token,
-        hostName.trim(),
+        provisioning,
         wifiName.trim(),
         wifiPassword,
       );
@@ -482,14 +497,28 @@ function AddDeviceScreen({
             <>
               <Text style={styles.setupTitle}>连接主机热点</Text>
               <Text style={styles.setupDescription}>
-                主机通电后，长按配网键直到指示灯闪烁。然后在手机 Wi-Fi 设置中连接 ClawPi 开头的热点。
+                保持手机联网并准备绑定，再连接 ClawPi 开头的主机热点。
               </Text>
+              <View style={styles.formBlockCompact}>
+                <Field
+                  label="主机名称"
+                  onChangeText={(value) => { setHostName(value); setProvisioning(null); }}
+                  placeholder="例如 客厅主机"
+                  value={hostName}
+                />
+              </View>
               <View style={styles.stepList}>
                 <View style={styles.stepRow}><Text style={styles.stepNumber}>1</Text><Text style={styles.stepText}>手机连接主机热点</Text></View>
                 <View style={styles.stepRow}><Text style={styles.stepNumber}>2</Text><Text style={styles.stepText}>写入家庭 Wi-Fi</Text></View>
                 <View style={styles.stepRow}><Text style={styles.stepNumber}>3</Text><Text style={styles.stepText}>设置模型服务并自动绑定账号</Text></View>
               </View>
-              <PrimaryButton icon="wifi" label="打开 Wi-Fi 设置" onPress={openWifiSettings} />
+              {!!error && <Text style={styles.errorText}>{error}</Text>}
+              <PrimaryButton
+                icon="wifi"
+                label="准备绑定并打开 Wi-Fi"
+                loading={loading}
+                onPress={prepareAndOpenWifiSettings}
+              />
               <TextButton label="已连接主机热点，继续" onPress={openNetworkStep} />
             </>
           )}
@@ -498,7 +527,6 @@ function AddDeviceScreen({
               <Text style={styles.setupTitle}>设置主机网络</Text>
               <Text style={styles.setupDescription}>写入后主机会关闭热点、连接家庭网络并自动绑定当前账号，请保持手机联网。</Text>
               <View style={styles.formBlock}>
-                <Field label="主机名称" onChangeText={setHostName} placeholder="例如 客厅主机" value={hostName} />
                 <View style={styles.wifiSectionHeader}>
                   <Text style={styles.wifiSectionLabel}>选择 Wi-Fi</Text>
                   <IconButton icon="refresh" label="重新扫描" onPress={confirmWifiRefresh} />

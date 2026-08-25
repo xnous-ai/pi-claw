@@ -42,6 +42,13 @@ export type WifiNetwork = {
   secured: boolean;
 };
 
+export type DeviceProvisioning = {
+  claimToken: string;
+  existingDeviceIds: string[];
+  expiresAt: string;
+  name: string;
+};
+
 type WifiNetworksResponse = {
   networks?: WifiNetwork[];
   refreshing?: boolean;
@@ -197,9 +204,35 @@ export async function refreshHostWifiNetworks(): Promise<WifiNetwork[]> {
   throw new Error(`热点恢复超时：${lastError instanceof Error ? lastError.message : '请重新连接主机热点'}`);
 }
 
-export async function configureDeviceNetwork(
+export async function prepareDeviceProvisioning(
   token: string,
   name: string,
+): Promise<DeviceProvisioning> {
+  if (isDemoMode) {
+    return {
+      claimToken: 'demo-claim-token',
+      existingDeviceIds: [],
+      expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+      name,
+    };
+  }
+  const existingDevices = await request<Device[]>('/v1/devices', { method: 'GET' }, token);
+  const provisioning = await request<{ claimToken: string; expiresAt: string }>(
+    '/v1/provisioning/sessions',
+    { method: 'POST', body: JSON.stringify({ name }) },
+    token,
+  );
+  return {
+    claimToken: provisioning.claimToken,
+    existingDeviceIds: existingDevices.map((device) => device.id),
+    expiresAt: provisioning.expiresAt,
+    name,
+  };
+}
+
+export async function configureDeviceNetwork(
+  token: string,
+  provisioning: DeviceProvisioning,
   wifiName: string,
   wifiPassword: string,
 ): Promise<Device> {
@@ -208,20 +241,17 @@ export async function configureDeviceNetwork(
     const suffix = Date.now().toString().slice(-6);
     return {
       id: `demo-host-${suffix}`,
-      name,
+      name: provisioning.name,
       serial: `CP-${suffix}`,
       status: 'online',
       version: 'ClawPi OS 1.0.0',
       lastSeenAt: new Date().toISOString(),
     };
   }
-  const existingDevices = await request<Device[]>('/v1/devices', { method: 'GET' }, token);
-  const existingIds = new Set(existingDevices.map((device) => device.id));
-  const provisioning = await request<{ claimToken: string }>(
-    '/v1/provisioning/sessions',
-    { method: 'POST', body: JSON.stringify({ name }) },
-    token,
-  );
+  if (Date.parse(provisioning.expiresAt) <= Date.now()) {
+    throw new Error('绑定准备已过期，请重新连接互联网后再试');
+  }
+  const existingIds = new Set(provisioning.existingDeviceIds);
   const configured = await requestUrl<{ accepted?: boolean; device?: Device }>(
     `${HOST_SETUP_URL}/provision`,
     {
