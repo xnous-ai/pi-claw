@@ -541,7 +541,18 @@ class PiRpcAgent:
                         emitted = True
                         yield str(update["delta"])
                 elif event.get("type") == "message_end":
-                    candidate = message_text(event.get("message", {}))
+                    message = event.get("message", {})
+                    if message.get("role") != "assistant":
+                        continue
+                    if message.get("stopReason") == "error":
+                        detail = str(message.get("errorMessage") or "Pi agent 执行失败")
+                        if "API key not valid" in detail or "API_KEY_INVALID" in detail:
+                            raise RuntimeError(
+                                f"{(self.provider or '模型服务商').title()} API Key 无效，"
+                                "请在主机设置中重新配置"
+                            )
+                        raise RuntimeError(detail)
+                    candidate = message_text(message)
                     if candidate:
                         final_text = candidate
                 elif event.get("type") == "agent_settled":

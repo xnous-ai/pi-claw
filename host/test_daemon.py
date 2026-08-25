@@ -85,6 +85,45 @@ class PiRpcAgentTest(unittest.TestCase):
             "完成",
         )
 
+    def test_does_not_echo_user_message_when_provider_rejects_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / "fake_pi.py"
+            script.write_text(
+                textwrap.dedent(
+                    """
+                    import json
+                    import sys
+
+                    command = json.loads(sys.stdin.readline())
+                    print(json.dumps({
+                        "type": "message_end",
+                        "message": {"role": "user", "content": command["message"]}
+                    }), flush=True)
+                    print(json.dumps({
+                        "type": "message_end",
+                        "message": {
+                            "role": "assistant",
+                            "content": [],
+                            "stopReason": "error",
+                            "errorMessage": "API key not valid (API_KEY_INVALID)"
+                        }
+                    }), flush=True)
+                    print(json.dumps({"type": "agent_settled"}), flush=True)
+                    sys.stdin.read()
+                    """
+                ),
+                encoding="utf-8",
+            )
+            agent = FakePiAgent(script, root)
+            agent.provider = "google"
+
+            async def collect() -> str:
+                return "".join([part async for part in agent.stream("conversation-1", "你好")])
+
+            with self.assertRaisesRegex(RuntimeError, "Google API Key 无效"):
+                asyncio.run(collect())
+
     def test_logs_chat_lifecycle_without_message_text(self) -> None:
         class FakeWebsocket:
             def __init__(self) -> None:
