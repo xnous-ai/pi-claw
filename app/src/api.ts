@@ -44,7 +44,8 @@ export type WifiNetwork = {
 
 export type DeviceProvisioning = {
   claimToken: string;
-  existingDeviceIds: string[];
+  existingDeviceIds?: string[];
+  existingDevices: Pick<Device, 'id' | 'name' | 'status' | 'lastSeenAt'>[];
   expiresAt: string;
   name: string;
 };
@@ -64,6 +65,13 @@ const API_URL = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '');
 const HOST_SETUP_URL =
   process.env.EXPO_PUBLIC_HOST_SETUP_URL?.replace(/\/$/, '') || 'http://192.168.4.1:8090';
 export const isDemoMode = !API_URL;
+
+class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
 
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -91,7 +99,10 @@ async function requestUrl<T>(
     });
     const body = await response.json().catch(() => null);
     if (!response.ok) {
-      throw new Error(body?.detail || body?.message || `请求失败（${response.status}）`);
+      throw new ApiError(
+        body?.detail || body?.message || `请求失败（${response.status}）`,
+        response.status,
+      );
     }
     return body as T;
   } catch (error) {
@@ -211,7 +222,7 @@ export async function prepareDeviceProvisioning(
   if (isDemoMode) {
     return {
       claimToken: 'demo-claim-token',
-      existingDeviceIds: [],
+      existingDevices: [],
       expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
       name,
     };
@@ -224,7 +235,12 @@ export async function prepareDeviceProvisioning(
   );
   return {
     claimToken: provisioning.claimToken,
-    existingDeviceIds: existingDevices.map((device) => device.id),
+    existingDevices: existingDevices.map(({ id, name: deviceName, status, lastSeenAt }) => ({
+      id,
+      name: deviceName,
+      status,
+      lastSeenAt,
+    })),
     expiresAt: provisioning.expiresAt,
     name,
   };
@@ -251,7 +267,12 @@ export async function configureDeviceNetwork(
   if (Date.parse(provisioning.expiresAt) <= Date.now()) {
     throw new Error('绑定准备已过期，请重新连接互联网后再试');
   }
-  const existingIds = new Set(provisioning.existingDeviceIds);
+  const previousDevices = new Map(
+    (provisioning.existingDevices ?? []).map((device) => [device.id, device]),
+  );
+  const existingIds = new Set(
+    provisioning.existingDevices?.map((device) => device.id) ?? provisioning.existingDeviceIds ?? [],
+  );
   const configured = await requestUrl<{ accepted?: boolean; device?: Device }>(
     `${HOST_SETUP_URL}/provision`,
     {
@@ -270,14 +291,26 @@ export async function configureDeviceNetwork(
     throw new Error('主机返回了无效的配网信息');
   }
 
-  for (let attempt = 0; attempt < 120; attempt += 1) {
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
     try {
-      const devices = await request<Device[]>('/v1/devices', { method: 'GET' }, token);
+      const devices = await requestUrl<Device[]>(
+        `${API_URL}/v1/devices`,
+        { method: 'GET' },
+        token,
+        5_000,
+      );
       const device = configured.device?.id
         ? devices.find((item) => item.id === configured.device?.id)
-        : devices.find((item) => !existingIds.has(item.id));
+        : devices.find((item) => !existingIds.has(item.id)) ?? devices.find((item) => {
+            const previous = previousDevices.get(item.id);
+            return previous
+              && item.name === provisioning.name
+              && (item.lastSeenAt !== previous.lastSeenAt || item.status !== previous.status);
+          });
       if (device?.status === 'online') return device;
-    } catch {
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) throw error;
       // The phone briefly loses networking while the host hotspot shuts down.
     }
     await delay(1_000);

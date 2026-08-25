@@ -39,12 +39,17 @@ node -e 'const [major, minor] = process.versions.node.split(".").map(Number); pr
 
 id clawpi >/dev/null 2>&1 || useradd --system --home-dir /var/lib/clawpi --shell /usr/sbin/nologin clawpi
 install -d -m 0755 /opt/clawpi
-install -d -o clawpi -g clawpi -m 0750 /var/lib/clawpi /var/lib/clawpi/workspace /var/lib/clawpi/sessions /var/lib/clawpi/pi-config
+install -d -o root -g clawpi -m 0770 /var/lib/clawpi
+install -d -o clawpi -g clawpi -m 0750 /var/lib/clawpi/workspace /var/lib/clawpi/sessions /var/lib/clawpi/pi-config
 install -d -m 0750 /etc/clawpi
-chown clawpi:clawpi /var/lib/clawpi
-chmod 0750 /var/lib/clawpi
+chown root:clawpi /var/lib/clawpi
+chmod 0770 /var/lib/clawpi
 chown -R clawpi:clawpi /var/lib/clawpi/workspace /var/lib/clawpi/sessions /var/lib/clawpi/pi-config
 chmod 0750 /var/lib/clawpi/workspace /var/lib/clawpi/sessions /var/lib/clawpi/pi-config
+if [ -f /var/lib/clawpi/credentials.json ]; then
+    chown root:clawpi /var/lib/clawpi/credentials.json
+    chmod 0600 /var/lib/clawpi/credentials.json
+fi
 
 install -m 0644 "$SCRIPT_DIR/daemon.py" /opt/clawpi/daemon.py
 install -m 0644 "$SCRIPT_DIR/simulator.py" /opt/clawpi/simulator.py

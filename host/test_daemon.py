@@ -198,6 +198,11 @@ class ProvisioningTest(unittest.TestCase):
         self.assertEqual(len(rescans), 2)
         self.assertEqual(len(connects), 2)
 
+    def test_install_allows_service_to_save_credentials(self) -> None:
+        script = Path(__file__).with_name("install.sh").read_text(encoding="utf-8")
+        self.assertIn("install -d -o root -g clawpi -m 0770 /var/lib/clawpi", script)
+        self.assertIn("chown root:clawpi /var/lib/clawpi", script)
+
     def test_allows_only_one_wifi_refresh_at_a_time(self) -> None:
         started = threading.Event()
         release = threading.Event()
