@@ -759,7 +759,9 @@ async def user_chat_websocket(websocket: WebSocket) -> None:
                 await send({"type": "chat.error", "message": "聊天操作格式无效"})
                 continue
             event_type = payload.get("type")
-            if event_type == "chat.start":
+            if event_type == "heartbeat":
+                await send({"type": "heartbeat.ack"})
+            elif event_type == "chat.start":
                 if active:
                     await send({"type": "chat.error", "message": "上一条消息仍在处理中"})
                     continue

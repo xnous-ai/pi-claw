@@ -564,12 +564,14 @@ export async function streamAgentMessage(
     const clientMessageId = `client-${Date.now()}`;
     let accumulated = '';
     let settled = false;
+    let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
     const connectionTimer = setTimeout(() => {
       finishWithError('连接聊天服务超时');
     }, 15_000);
 
     function close() {
       clearTimeout(connectionTimer);
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
       if (socket.readyState === 0 || socket.readyState === 1) socket.close();
     }
 
@@ -597,6 +599,9 @@ export async function streamAgentMessage(
       }
       if (payload.type === 'chat.ready') {
         clearTimeout(connectionTimer);
+        heartbeatTimer = setInterval(() => {
+          if (socket.readyState === 1) socket.send(JSON.stringify({ type: 'heartbeat' }));
+        }, 20_000);
         socket.send(JSON.stringify({
           type: 'chat.start',
           clientMessageId,
