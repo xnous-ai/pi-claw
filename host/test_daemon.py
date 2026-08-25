@@ -15,6 +15,7 @@ from daemon import (
     PiRpcAgent,
     ProvisioningServer,
     apply_agent_config,
+    connect_wifi,
     has_network_connection,
     handle_agent_configuration,
     load_agent_config,
@@ -183,6 +184,19 @@ class ProvisioningTest(unittest.TestCase):
                 refresh_hotspot_networks("wlp1s0", "clawpi-setup", "ClawPi-Test", "12345678")
         stop.assert_called_once_with("clawpi-setup")
         start.assert_called_once_with("wlp1s0", "clawpi-setup", "ClawPi-Test", "12345678")
+
+    def test_rescans_and_retries_wifi_after_stopping_hotspot(self) -> None:
+        ok = CompletedProcess([], 0, "", "")
+        missing = CompletedProcess([], 10, "", "Error: No network with SSID 'Home' found.")
+        with patch(
+            "daemon.run_nmcli", side_effect=[ok, ok, ok, missing, ok, ok]
+        ) as nmcli, patch("daemon.time.sleep"):
+            connect_wifi("wlp1s0", "clawpi-setup", "Home", "secret123")
+
+        rescans = [call for call in nmcli.call_args_list if "rescan" in call.args]
+        connects = [call for call in nmcli.call_args_list if "connect" in call.args]
+        self.assertEqual(len(rescans), 2)
+        self.assertEqual(len(connects), 2)
 
     def test_allows_only_one_wifi_refresh_at_a_time(self) -> None:
         started = threading.Event()

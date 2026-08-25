@@ -199,22 +199,32 @@ def refresh_hotspot_networks(
 def connect_wifi(interface: str, hotspot_connection: str, ssid: str, password: str) -> None:
     run_nmcli("connection", "modify", hotspot_connection, "connection.autoconnect", "no")
     run_nmcli("connection", "down", hotspot_connection, check=False)
-    result = run_nmcli(
-        "--wait",
-        "45",
-        "device",
-        "wifi",
-        "connect",
-        ssid,
-        "password",
-        password,
-        "ifname",
-        interface,
-        timeout=60,
-        check=False,
-    )
-    if result.returncode:
-        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "无法连接家庭 Wi-Fi")
+    result = None
+    for attempt in range(3):
+        run_nmcli(
+            "device", "wifi", "rescan", "ifname", interface, "ssid", ssid,
+            timeout=15, check=False,
+        )
+        time.sleep(2)
+        result = run_nmcli(
+            "--wait",
+            "45",
+            "device",
+            "wifi",
+            "connect",
+            ssid,
+            "password",
+            password,
+            "ifname",
+            interface,
+            timeout=60,
+            check=False,
+        )
+        if not result.returncode:
+            return
+        if attempt < 2:
+            time.sleep(3)
+    raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "无法连接家庭 Wi-Fi")
 
 
 class ProvisioningServer(ThreadingHTTPServer):
