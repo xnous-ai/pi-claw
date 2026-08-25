@@ -507,6 +507,45 @@ def message_text(message: dict) -> str:
     return ""
 
 
+class InteractionBroker:
+    def __init__(self) -> None:
+        self.pending: dict[str, asyncio.Future[dict]] = {}
+
+    def prepare(self, interaction_id: str) -> asyncio.Future[dict]:
+        future = asyncio.get_running_loop().create_future()
+        self.pending[interaction_id] = future
+        return future
+
+    def resolve(self, interaction_id: str, response: dict) -> bool:
+        future = self.pending.get(interaction_id)
+        if not future or future.done():
+            return False
+        future.set_result(response)
+        return True
+
+    def finish(self, interaction_id: str) -> None:
+        self.pending.pop(interaction_id, None)
+
+    def cancel(self) -> None:
+        for future in self.pending.values():
+            if not future.done():
+                future.cancel()
+        self.pending.clear()
+
+
+def tool_status_label(tool_name: str) -> str:
+    return {
+        "bash": "正在执行命令",
+        "read": "正在读取文件",
+        "write": "正在写入文件",
+        "edit": "正在修改文件",
+        "search": "正在搜索",
+        "web_search": "正在搜索网页",
+        "fetch": "正在读取网页",
+        "ask_user": "正在等待你的选择",
+    }.get(tool_name, f"正在使用 {tool_name}")
+
+
 class PiRpcAgent:
     def __init__(
         self,
@@ -602,7 +641,13 @@ class PiRpcAgent:
                     process.kill()
                     await process.wait()
 
-    async def stream(self, conversation_id: str, text: str):
+    async def stream(
+        self,
+        conversation_id: str,
+        text: str,
+        on_event=None,
+        interactions: InteractionBroker | None = None,
+    ):
         process = await asyncio.create_subprocess_exec(
             *self.arguments(conversation_id),
             cwd=self.workspace,
@@ -615,6 +660,11 @@ class PiRpcAgent:
         stderr_task = asyncio.create_task(process.stderr.read())
         emitted = False
         final_text = ""
+
+        async def emit(event: dict) -> None:
+            if on_event:
+                await on_event(event)
+
         try:
             command = {"id": "clawpi-prompt", "type": "prompt", "message": text}
             process.stdin.write((json.dumps(command, ensure_ascii=False) + "\n").encode())
@@ -628,6 +678,112 @@ class PiRpcAgent:
                     if update.get("type") == "text_delta" and update.get("delta"):
                         emitted = True
                         yield str(update["delta"])
+                elif event.get("type") == "tool_execution_start":
+                    await emit(
+                        {
+                            "type": "chat.status",
+                            "statusId": str(event.get("toolCallId") or uuid4()),
+                            "label": tool_status_label(str(event.get("toolName") or "工具")),
+                            "state": "running",
+                        }
+                    )
+                elif event.get("type") == "tool_execution_end":
+                    await emit(
+                        {
+                            "type": "chat.status",
+                            "statusId": str(event.get("toolCallId") or uuid4()),
+                            "label": tool_status_label(str(event.get("toolName") or "工具")),
+                            "state": "error" if event.get("isError") else "done",
+                        }
+                    )
+                elif event.get("type") == "extension_ui_request":
+                    method = str(event.get("method") or "")
+                    if method in {"select", "confirm", "input", "editor"}:
+                        interaction_id = str(event.get("id") or uuid4())
+                        response = {"cancelled": True}
+                        if interactions:
+                            waiting = interactions.prepare(interaction_id)
+                            await emit(
+                                {
+                                    "type": "chat.interaction",
+                                    "interactionId": interaction_id,
+                                    "method": method,
+                                    "title": str(event.get("title") or "需要你的确认"),
+                                    "message": str(event.get("message") or ""),
+                                    "options": [str(item) for item in event.get("options", [])],
+                                    "placeholder": str(event.get("placeholder") or ""),
+                                }
+                            )
+                            try:
+                                timeout_ms = int(event.get("timeout") or 0)
+                                response = await (
+                                    asyncio.wait_for(waiting, timeout_ms / 1000)
+                                    if timeout_ms > 0
+                                    else waiting
+                                )
+                            except TimeoutError:
+                                response = {"cancelled": True}
+                            finally:
+                                interactions.finish(interaction_id)
+                        process.stdin.write(
+                            (
+                                json.dumps(
+                                    {
+                                        "type": "extension_ui_response",
+                                        "id": interaction_id,
+                                        **response,
+                                    },
+                                    ensure_ascii=False,
+                                )
+                                + "\n"
+                            ).encode()
+                        )
+                        await process.stdin.drain()
+                    elif method == "notify" and event.get("message"):
+                        await emit(
+                            {
+                                "type": "chat.status",
+                                "statusId": str(event.get("id") or uuid4()),
+                                "label": str(event["message"]),
+                                "state": "error" if event.get("notifyType") == "error" else "done",
+                            }
+                        )
+                elif event.get("type") == "compaction_start":
+                    await emit(
+                        {
+                            "type": "chat.status",
+                            "statusId": "compaction",
+                            "label": "正在整理会话上下文",
+                            "state": "running",
+                        }
+                    )
+                elif event.get("type") == "compaction_end":
+                    await emit(
+                        {
+                            "type": "chat.status",
+                            "statusId": "compaction",
+                            "label": "会话上下文已整理",
+                            "state": "error" if event.get("errorMessage") else "done",
+                        }
+                    )
+                elif event.get("type") == "auto_retry_start":
+                    await emit(
+                        {
+                            "type": "chat.status",
+                            "statusId": "retry",
+                            "label": "模型服务繁忙，正在重试",
+                            "state": "running",
+                        }
+                    )
+                elif event.get("type") == "auto_retry_end":
+                    await emit(
+                        {
+                            "type": "chat.status",
+                            "statusId": "retry",
+                            "label": "重试已完成" if event.get("success") else "重试失败",
+                            "state": "done" if event.get("success") else "error",
+                        }
+                    )
                 elif event.get("type") == "message_end":
                     message = event.get("message", {})
                     if message.get("role") != "assistant":
@@ -671,7 +827,13 @@ async def heartbeat(websocket) -> None:
         await websocket.send(json.dumps({"type": "heartbeat"}))
 
 
-async def handle_chat(websocket, message: dict, agent: PiRpcAgent, timeout: int) -> None:
+async def handle_chat(
+    websocket,
+    message: dict,
+    agent: PiRpcAgent,
+    timeout: int,
+    interactions: InteractionBroker | None = None,
+) -> None:
     request_id = str(message.get("requestId", ""))
     conversation_id = str(message.get("conversationId", ""))
     session_id = agent.session_id(conversation_id) if conversation_id else "unknown"
@@ -686,7 +848,17 @@ async def handle_chat(websocket, message: dict, agent: PiRpcAgent, timeout: int)
         )
 
         async def forward_response() -> None:
-            async for delta in agent.stream(conversation_id, str(message["text"])):
+            async def forward_event(event: dict) -> None:
+                await websocket.send(
+                    json.dumps({**event, "requestId": request_id}, ensure_ascii=False)
+                )
+
+            async for delta in agent.stream(
+                conversation_id,
+                str(message["text"]),
+                on_event=forward_event,
+                interactions=interactions,
+            ):
                 await websocket.send(
                     json.dumps(
                         {"type": "chat.delta", "requestId": request_id, "delta": delta},
@@ -1027,12 +1199,60 @@ async def run_host(
             ) as websocket:
                 delay = 1
                 heartbeat_task = asyncio.create_task(heartbeat(websocket))
+                active_chats: dict[str, tuple[asyncio.Task, InteractionBroker]] = {}
                 print(f"主机已连接：{credentials['deviceId']}", flush=True)
                 try:
                     async for raw_message in websocket:
                         message = json.loads(raw_message)
                         if message.get("type") == "chat.request":
-                            await handle_chat(websocket, message, agent, timeout)
+                            request_id = str(message.get("requestId") or "")
+                            if active_chats:
+                                await websocket.send(
+                                    json.dumps(
+                                        {
+                                            "type": "chat.error",
+                                            "requestId": request_id,
+                                            "message": "主机正在处理另一条消息",
+                                        },
+                                        ensure_ascii=False,
+                                    )
+                                )
+                                continue
+                            broker = InteractionBroker()
+
+                            async def run_chat(
+                                chat_message=message,
+                                chat_request_id=request_id,
+                                chat_broker=broker,
+                            ) -> None:
+                                try:
+                                    await handle_chat(
+                                        websocket,
+                                        chat_message,
+                                        agent,
+                                        timeout,
+                                        chat_broker,
+                                    )
+                                finally:
+                                    chat_broker.cancel()
+                                    active_chats.pop(chat_request_id, None)
+
+                            task = asyncio.create_task(run_chat())
+                            active_chats[request_id] = (task, broker)
+                        elif message.get("type") == "chat.interaction.response":
+                            active = active_chats.get(str(message.get("requestId") or ""))
+                            if active:
+                                active[1].resolve(
+                                    str(message.get("interactionId") or ""),
+                                    message.get("response")
+                                    if isinstance(message.get("response"), dict)
+                                    else {"cancelled": True},
+                                )
+                        elif message.get("type") == "chat.cancel":
+                            active = active_chats.get(str(message.get("requestId") or ""))
+                            if active:
+                                active[1].cancel()
+                                active[0].cancel()
                         elif message.get("type") == "agent.configure":
                             await handle_agent_configuration(
                                 websocket, message, agent, agent_config_path
@@ -1051,6 +1271,15 @@ async def run_host(
                                 skills_dir,
                             )
                 finally:
+                    chats_to_cancel = list(active_chats.values())
+                    for task, broker in chats_to_cancel:
+                        broker.cancel()
+                        task.cancel()
+                    if chats_to_cancel:
+                        await asyncio.gather(
+                            *(task for task, _ in chats_to_cancel),
+                            return_exceptions=True,
+                        )
                     heartbeat_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await heartbeat_task
@@ -1086,7 +1315,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pi-provider", default=os.getenv("CLAWPI_PI_PROVIDER") or None)
     parser.add_argument("--pi-model", default=os.getenv("CLAWPI_PI_MODEL") or None)
     parser.add_argument("--pi-thinking", default=os.getenv("CLAWPI_PI_THINKING") or None)
-    parser.add_argument("--agent-timeout", type=int, default=75)
+    parser.add_argument("--agent-timeout", type=int, default=600)
     return parser.parse_args()
 
 

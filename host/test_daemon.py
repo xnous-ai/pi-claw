@@ -15,6 +15,7 @@ from subprocess import CompletedProcess
 from unittest.mock import AsyncMock, patch
 
 from daemon import (
+    InteractionBroker,
     PiRpcAgent,
     ProvisioningServer,
     apply_agent_config,
@@ -61,6 +62,7 @@ class PiRpcAgentTest(unittest.TestCase):
                     import json
                     import sys
 
+                    sys.stdin.reconfigure(encoding="utf-8")
                     sys.stdout.reconfigure(encoding="utf-8")
                     command = json.loads(sys.stdin.readline())
                     print(json.dumps({"type": "response", "command": "prompt", "success": True}), flush=True)
@@ -140,7 +142,7 @@ class PiRpcAgentTest(unittest.TestCase):
                 self.messages.append(json.loads(value))
 
         class ReplyAgent(PiRpcAgent):
-            async def stream(self, conversation_id: str, text: str):
+            async def stream(self, conversation_id: str, text: str, **_kwargs):
                 yield "reply"
 
         websocket = FakeWebsocket()
@@ -164,6 +166,86 @@ class PiRpcAgentTest(unittest.TestCase):
         self.assertIn("聊天完成", logs)
         self.assertNotIn("private message", logs)
         self.assertEqual(websocket.messages[-1]["type"], "chat.complete")
+
+    def test_streams_tool_status_and_resumes_after_user_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / "fake_interactive_pi.py"
+            script.write_text(
+                textwrap.dedent(
+                    """
+                    import json
+                    import sys
+
+                    sys.stdin.reconfigure(encoding="utf-8")
+                    sys.stdout.reconfigure(encoding="utf-8")
+                    json.loads(sys.stdin.readline())
+                    print(json.dumps({
+                        "type": "tool_execution_start",
+                        "toolCallId": "tool-1",
+                        "toolName": "read"
+                    }), flush=True)
+                    print(json.dumps({
+                        "type": "tool_execution_end",
+                        "toolCallId": "tool-1",
+                        "toolName": "read",
+                        "isError": False
+                    }), flush=True)
+                    print(json.dumps({
+                        "type": "extension_ui_request",
+                        "id": "choice-1",
+                        "method": "select",
+                        "title": "选择方案",
+                        "options": ["方案 A", "方案 B"]
+                    }, ensure_ascii=False), flush=True)
+                    response = json.loads(sys.stdin.readline())
+                    assert response["type"] == "extension_ui_response"
+                    assert response["value"] == "方案 B"
+                    print(json.dumps({
+                        "type": "message_update",
+                        "assistantMessageEvent": {"type": "text_delta", "delta": "继续完成"}
+                    }, ensure_ascii=False), flush=True)
+                    print(json.dumps({"type": "agent_settled"}), flush=True)
+                    sys.stdin.read()
+                    """
+                ),
+                encoding="utf-8",
+            )
+            agent = FakePiAgent(script, root)
+            broker = InteractionBroker()
+            events: list[dict] = []
+
+            async def collect() -> str:
+                async def on_event(event: dict) -> None:
+                    events.append(event)
+                    if event["type"] == "chat.interaction":
+                        broker.resolve(event["interactionId"], {"value": "方案 B"})
+
+                return "".join(
+                    [
+                        part
+                        async for part in agent.stream(
+                            "conversation-1",
+                            "开始",
+                            on_event=on_event,
+                            interactions=broker,
+                        )
+                    ]
+                )
+
+            self.assertEqual(asyncio.run(collect()), "继续完成")
+            self.assertEqual(
+                [event["type"] for event in events],
+                ["chat.status", "chat.status", "chat.interaction"],
+            )
+            self.assertEqual(events[0]["state"], "running")
+            self.assertEqual(events[1]["state"], "done")
+
+    def test_installs_builtin_interaction_extension(self) -> None:
+        install_script = Path("install.sh").read_text(encoding="utf-8")
+        extension = Path("clawpi-interaction.ts").read_text(encoding="utf-8")
+        self.assertIn("clawpi-interaction.ts", install_script)
+        self.assertIn('name: "ask_user"', extension)
 
 
 class ProvisioningTest(unittest.TestCase):

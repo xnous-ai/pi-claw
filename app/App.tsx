@@ -31,7 +31,10 @@ import {
   releaseDevice,
   removeDeviceCapability,
   scanHostWifiNetworks,
-  sendAgentMessage,
+  streamAgentMessage,
+  type AgentInteraction,
+  type AgentStep,
+  type InteractionResponse,
   type AgentProvider,
   type AgentConfiguration,
   type AgentModelOption,
@@ -852,17 +855,112 @@ function ConversationListScreen({
   );
 }
 
+function InteractionPrompt({
+  interaction,
+  onRespond,
+}: {
+  interaction: AgentInteraction;
+  onRespond: (interactionId: string, response: InteractionResponse, answer: string) => void;
+}) {
+  const [value, setValue] = useState('');
+
+  if (!interaction.pending) {
+    return (
+      <View style={styles.interactionAnswered}>
+        <Icon color={colors.success} name="check_circle" size={16} />
+        <Text style={styles.interactionAnsweredText}>{interaction.answer || '已回复'}</Text>
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.interactionBlock}>
+      <Text style={styles.interactionTitle}>{interaction.title}</Text>
+      {!!interaction.message && <Text style={styles.interactionMessage}>{interaction.message}</Text>}
+      {interaction.method === 'select' && (
+        <View style={styles.interactionOptions}>
+          {interaction.options.map((option, index) => (
+            <Pressable
+              accessibilityRole="button"
+              key={`${interaction.id}-${index}`}
+              onPress={() => onRespond(interaction.id, { value: option }, option)}
+              style={({ pressed }) => [styles.interactionOption, pressed && styles.rowPressed]}
+            >
+              <Text style={styles.interactionOptionText}>{option}</Text>
+              <Icon color={colors.subtle} name="chevron_right" size={18} />
+            </Pressable>
+          ))}
+        </View>
+      )}
+      {interaction.method === 'confirm' && (
+        <View style={styles.interactionActions}>
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => onRespond(interaction.id, { confirmed: false }, '已取消')}
+            style={({ pressed }) => [styles.interactionSecondaryButton, pressed && styles.rowPressed]}
+          >
+            <Text style={styles.interactionSecondaryText}>取消</Text>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => onRespond(interaction.id, { confirmed: true }, '已确认')}
+            style={({ pressed }) => [styles.interactionPrimaryButton, pressed && styles.pressed]}
+          >
+            <Text style={styles.interactionPrimaryText}>确认</Text>
+          </Pressable>
+        </View>
+      )}
+      {(interaction.method === 'input' || interaction.method === 'editor') && (
+        <>
+          <TextInput
+            accessibilityLabel={interaction.title}
+            multiline={interaction.method === 'editor'}
+            onChangeText={setValue}
+            placeholder={interaction.placeholder || '请输入'}
+            placeholderTextColor={colors.subtle}
+            style={interaction.method === 'editor' ? styles.interactionEditor : styles.interactionInput}
+            value={value}
+          />
+          <View style={styles.interactionActions}>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => onRespond(interaction.id, { cancelled: true }, '已取消')}
+              style={({ pressed }) => [styles.interactionSecondaryButton, pressed && styles.rowPressed]}
+            >
+              <Text style={styles.interactionSecondaryText}>取消</Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              disabled={!value.trim()}
+              onPress={() => onRespond(interaction.id, { value: value.trim() }, value.trim())}
+              style={({ pressed }) => [
+                styles.interactionPrimaryButton,
+                !value.trim() && styles.sendButtonDisabled,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Text style={styles.interactionPrimaryText}>提交</Text>
+            </Pressable>
+          </View>
+        </>
+      )}
+    </View>
+  );
+}
+
 function ChatScreen({
   conversation,
   device,
   sending,
   onBack,
+  onRespondInteraction,
   onSend,
 }: {
   conversation: Conversation;
   device: Device;
   sending: boolean;
   onBack: () => void;
+  onRespondInteraction: (interactionId: string, response: InteractionResponse, answer: string) => void;
   onSend: (text: string) => Promise<void>;
 }) {
   const [draft, setDraft] = useState('');
@@ -906,7 +1004,42 @@ function ChatScreen({
             <View style={[styles.messageRow, message.role === 'user' && styles.userMessageRow]}>
               {message.role === 'assistant' && <View style={styles.agentAvatar}><Text style={styles.agentAvatarText}>P</Text></View>}
               <View style={[styles.messageBubble, message.role === 'user' ? styles.userBubble : styles.agentBubble]}>
-                <Text style={message.role === 'user' ? styles.userMessageText : styles.agentMessageText}>{message.text}</Text>
+                {message.role === 'assistant' && !!message.steps?.length && (
+                  <View style={styles.agentSteps}>
+                    {message.steps.map((step) => (
+                      <View key={step.id} style={styles.agentStepRow}>
+                        {step.state === 'running' ? (
+                          <ActivityIndicator color={colors.accent} size="small" />
+                        ) : (
+                          <Icon
+                            color={step.state === 'error' ? colors.danger : colors.success}
+                            name={step.state === 'error' ? 'error' : 'check_circle'}
+                            size={16}
+                          />
+                        )}
+                        <Text style={styles.agentStepText}>{step.label}</Text>
+                      </View>
+                    ))}
+                  </View>
+                )}
+                {message.role === 'assistant' && message.streaming && !message.text && !message.interaction && (
+                  <View style={styles.inlineAgentStatus}>
+                    <ActivityIndicator color={colors.accent} size="small" />
+                    <Text accessibilityLiveRegion="polite" style={styles.typingText}>
+                      {message.status || 'Pi agent 正在处理'}
+                    </Text>
+                  </View>
+                )}
+                {!!message.text && (
+                  <Text style={message.role === 'user' ? styles.userMessageText : styles.agentMessageText}>{message.text}</Text>
+                )}
+                {message.role === 'assistant' && message.interaction && (
+                  <InteractionPrompt
+                    interaction={message.interaction}
+                    key={message.interaction.id}
+                    onRespond={onRespondInteraction}
+                  />
+                )}
                 <Text style={message.role === 'user' ? styles.userTime : styles.agentTime}>{formatTime(message.createdAt)}</Text>
               </View>
             </View>
@@ -918,15 +1051,6 @@ function ChatScreen({
             )}
           </View>
         ))}
-        {sending && (
-          <View style={styles.messageRow}>
-            <View style={styles.agentAvatar}><Text style={styles.agentAvatarText}>P</Text></View>
-            <View style={[styles.messageBubble, styles.agentBubble, styles.typingBubble]}>
-              <ActivityIndicator color={colors.accent} size="small" />
-              <Text style={styles.typingText}>Pi agent 正在处理</Text>
-            </View>
-          </View>
-        )}
       </ScrollView>
       {!!error && <Text style={styles.composerError}>{error}，消息已保留。</Text>}
       <View style={styles.composerWrap}>
@@ -1512,6 +1636,7 @@ function MainScreen({
   onRemoveCapability,
   onRefreshDevice,
   onReleaseDevice,
+  onRespondInteraction,
   onSend,
   onSignOut,
 }: {
@@ -1527,6 +1652,7 @@ function MainScreen({
   onRemoveCapability: (deviceId: string, capabilityId: string) => Promise<void>;
   onRefreshDevice: (deviceId: string) => Promise<void>;
   onReleaseDevice: (deviceId: string) => Promise<void>;
+  onRespondInteraction: (interactionId: string, response: InteractionResponse, answer: string) => void;
   onSend: (conversationId: string, text: string) => Promise<void>;
   onSignOut: () => void;
 }) {
@@ -1582,6 +1708,7 @@ function MainScreen({
         conversation={conversation}
         device={device}
         onBack={() => setRoute({ name: 'root' })}
+        onRespondInteraction={onRespondInteraction}
         onSend={(text) => onSend(conversation.id, text)}
         sending={sending}
       />
@@ -1678,6 +1805,10 @@ function AppContent() {
   const [session, setSession] = useState<AuthSession | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [sending, setSending] = useState(false);
+  const interactionResponders = useRef(new Map<string, {
+    answer: (label: string) => void;
+    respond: (response: InteractionResponse) => void;
+  }>());
 
   useEffect(() => {
     async function restore() {
@@ -1803,10 +1934,23 @@ function AppContent() {
     return conversation;
   }
 
+  function respondToInteraction(
+    interactionId: string,
+    response: InteractionResponse,
+    answer: string,
+  ) {
+    const pendingInteraction = interactionResponders.current.get(interactionId);
+    if (!pendingInteraction) return;
+    pendingInteraction.respond(response);
+    pendingInteraction.answer(answer);
+    interactionResponders.current.delete(interactionId);
+  }
+
   async function sendMessage(conversationId: string, text: string) {
     if (!session || sending) return;
     const original = conversations.find((item) => item.id === conversationId);
     if (!original) return;
+    const originalMessages = original.messages;
     const userMessage: AgentMessage = {
       id: `user-${Date.now()}`,
       role: 'user',
@@ -1814,21 +1958,109 @@ function AppContent() {
       createdAt: new Date().toISOString(),
     };
     const title = original.title === '新会话' ? text.slice(0, 22) : original.title;
-    const pending: Conversation = {
+    let assistantMessage: AgentMessage = {
+      id: `assistant-pending-${Date.now()}`,
+      role: 'assistant',
+      text: '',
+      createdAt: userMessage.createdAt,
+      streaming: true,
+      status: 'Pi agent 正在处理',
+    };
+    const pendingConversation: Conversation = {
       ...original,
       title,
       updatedAt: userMessage.createdAt,
-      messages: [...original.messages, userMessage],
+      messages: [...originalMessages, userMessage, assistantMessage],
     };
-    setConversations((current) => current.map((item) => item.id === conversationId ? pending : item));
+    const activeInteractionIds = new Set<string>();
+
+    function publish() {
+      setConversations((current) => current.map((item) => item.id === conversationId ? {
+        ...pendingConversation,
+        updatedAt: new Date().toISOString(),
+        messages: [...originalMessages, userMessage, assistantMessage],
+      } : item));
+    }
+
+    setConversations((current) => current.map((item) => item.id === conversationId ? pendingConversation : item));
     setSending(true);
     try {
-      let reply: AgentMessage;
       try {
-        reply = await sendAgentMessage(session.token, original.deviceId, conversationId, text);
+        const reply = await streamAgentMessage(
+          session.token,
+          original.deviceId,
+          conversationId,
+          text,
+          {
+            onDelta: (delta) => {
+              assistantMessage = { ...assistantMessage, text: assistantMessage.text + delta };
+              publish();
+            },
+            onStatus: (step: AgentStep) => {
+              const steps = assistantMessage.steps ? [...assistantMessage.steps] : [];
+              const index = steps.findIndex((item) => item.id === step.id);
+              if (index >= 0) steps[index] = step;
+              else steps.push(step);
+              assistantMessage = {
+                ...assistantMessage,
+                status: step.state === 'running' ? step.label : assistantMessage.status,
+                steps,
+              };
+              publish();
+            },
+            onInteraction: (interaction, respond) => {
+              activeInteractionIds.add(interaction.id);
+              assistantMessage = {
+                ...assistantMessage,
+                interaction,
+                status: '等待你的选择',
+              };
+              interactionResponders.current.set(interaction.id, {
+                respond,
+                answer: (label) => {
+                  if (assistantMessage.interaction?.id !== interaction.id) return;
+                  assistantMessage = {
+                    ...assistantMessage,
+                    interaction: { ...assistantMessage.interaction, pending: false, answer: label },
+                    status: '正在继续执行',
+                  };
+                  publish();
+                },
+              });
+              publish();
+            },
+          },
+        );
+        assistantMessage = {
+          ...assistantMessage,
+          id: reply.id,
+          text: reply.text,
+          createdAt: reply.createdAt,
+          status: undefined,
+          streaming: false,
+        };
+        const completed = {
+          ...pendingConversation,
+          updatedAt: reply.createdAt,
+          messages: [...originalMessages, userMessage, assistantMessage],
+        };
+        const next = conversations
+          .map((item) => item.id === conversationId ? completed : item)
+          .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+        setConversations(next);
+        await saveConversations(next);
       } catch (sendError) {
         const failedMessage = { ...userMessage, error: errorMessage(sendError) };
-        const failed = { ...pending, messages: [...original.messages, failedMessage] };
+        const keepAssistant = !!assistantMessage.text || !!assistantMessage.steps?.length || !!assistantMessage.interaction;
+        assistantMessage = { ...assistantMessage, status: undefined, streaming: false };
+        const failed = {
+          ...pendingConversation,
+          messages: [
+            ...originalMessages,
+            failedMessage,
+            ...(keepAssistant ? [assistantMessage] : []),
+          ],
+        };
         const next = conversations
           .map((item) => item.id === conversationId ? failed : item)
           .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -1836,13 +2068,8 @@ function AppContent() {
         await saveConversations(next);
         return;
       }
-      const completed = { ...pending, updatedAt: reply.createdAt, messages: [...pending.messages, reply] };
-      const next = conversations
-        .map((item) => item.id === conversationId ? completed : item)
-        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-      setConversations(next);
-      await saveConversations(next);
     } finally {
+      activeInteractionIds.forEach((id) => interactionResponders.current.delete(id));
       setSending(false);
     }
   }
@@ -1874,6 +2101,7 @@ function AppContent() {
       onRemoveCapability={removeCapability}
       onRefreshDevice={refreshDevice}
       onReleaseDevice={unbindDevice}
+      onRespondInteraction={respondToInteraction}
       onSend={sendMessage}
       onSignOut={signOut}
       sending={sending}
@@ -2015,8 +2243,26 @@ const styles = StyleSheet.create({
   userTime: { color: '#C6D0E0', fontSize: 10, marginTop: 6, textAlign: 'right' },
   messageError: { alignItems: 'flex-start', alignSelf: 'flex-end', flexDirection: 'row', marginTop: 6, maxWidth: '79%' },
   messageErrorText: { color: colors.danger, flexShrink: 1, fontSize: 12, lineHeight: 17, marginLeft: 5, textAlign: 'right' },
-  typingBubble: { alignItems: 'center', flexDirection: 'row', paddingBottom: 12 },
+  agentSteps: { borderBottomColor: colors.line, borderBottomWidth: StyleSheet.hairlineWidth, marginBottom: 10, paddingBottom: 7 },
+  agentStepRow: { alignItems: 'center', flexDirection: 'row', minHeight: 26 },
+  agentStepText: { color: colors.muted, flex: 1, fontSize: 12, lineHeight: 17, marginLeft: 7 },
+  inlineAgentStatus: { alignItems: 'center', flexDirection: 'row', minHeight: 28 },
   typingText: { color: colors.muted, fontSize: 13, marginLeft: 8 },
+  interactionBlock: { borderTopColor: colors.line, borderTopWidth: StyleSheet.hairlineWidth, marginTop: 12, paddingTop: 12 },
+  interactionTitle: { color: colors.ink, fontSize: 14, fontWeight: '700', lineHeight: 20 },
+  interactionMessage: { color: colors.muted, fontSize: 12, lineHeight: 18, marginTop: 3 },
+  interactionOptions: { marginTop: 9 },
+  interactionOption: { alignItems: 'center', borderColor: colors.line, borderRadius: 8, borderWidth: 1, flexDirection: 'row', justifyContent: 'space-between', marginTop: 7, minHeight: 48, paddingHorizontal: 12, paddingVertical: 9 },
+  interactionOptionText: { color: colors.ink, flex: 1, fontSize: 14, lineHeight: 20, marginRight: 8 },
+  interactionActions: { flexDirection: 'row', marginTop: 10 },
+  interactionSecondaryButton: { alignItems: 'center', borderColor: colors.line, borderRadius: 8, borderWidth: 1, flex: 1, height: 46, justifyContent: 'center', marginRight: 7 },
+  interactionPrimaryButton: { alignItems: 'center', backgroundColor: colors.accent, borderRadius: 8, flex: 1, height: 46, justifyContent: 'center', marginLeft: 7 },
+  interactionSecondaryText: { color: colors.ink, fontSize: 14, fontWeight: '700' },
+  interactionPrimaryText: { color: colors.surface, fontSize: 14, fontWeight: '700' },
+  interactionInput: { backgroundColor: colors.background, borderColor: colors.line, borderRadius: 8, borderWidth: 1, color: colors.ink, fontSize: 14, height: 48, marginTop: 10, paddingHorizontal: 12 },
+  interactionEditor: { backgroundColor: colors.background, borderColor: colors.line, borderRadius: 8, borderWidth: 1, color: colors.ink, fontSize: 14, marginTop: 10, minHeight: 96, paddingHorizontal: 12, paddingTop: 11, textAlignVertical: 'top' },
+  interactionAnswered: { alignItems: 'center', borderTopColor: colors.line, borderTopWidth: StyleSheet.hairlineWidth, flexDirection: 'row', marginTop: 12, minHeight: 34, paddingTop: 9 },
+  interactionAnsweredText: { color: colors.success, flex: 1, fontSize: 12, lineHeight: 18, marginLeft: 6 },
   composerError: { backgroundColor: colors.dangerSoft, color: colors.danger, fontSize: 12, lineHeight: 18, paddingHorizontal: 16, paddingVertical: 7 },
   composerWrap: { alignItems: 'flex-end', backgroundColor: colors.surface, borderTopColor: colors.line, borderTopWidth: 1, flexDirection: 'row', paddingHorizontal: 12, paddingVertical: 10 },
   composerInput: { backgroundColor: colors.background, borderColor: colors.line, borderRadius: 8, borderWidth: 1, color: colors.ink, flex: 1, fontSize: 15, maxHeight: 100, minHeight: 48, paddingHorizontal: 14, paddingTop: 12 },

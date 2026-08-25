@@ -14,7 +14,7 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import create_engine, delete, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -698,6 +698,162 @@ async def send_message(
         raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, "主机响应超时")
     except RuntimeError as error:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(error))
+
+
+@app.websocket("/v1/chat/ws")
+async def user_chat_websocket(websocket: WebSocket) -> None:
+    await websocket.accept()
+    send_lock = asyncio.Lock()
+    active: dict[str, object] = {}
+    stream_task: asyncio.Task | None = None
+
+    async def send(payload: dict) -> None:
+        async with send_lock:
+            await websocket.send_json(payload)
+
+    try:
+        try:
+            auth = await asyncio.wait_for(websocket.receive_json(), timeout=10)
+        except TimeoutError:
+            await send({"type": "auth.error", "message": "登录验证超时"})
+            await websocket.close(code=1008)
+            return
+
+        token = (
+            str(auth.get("token") or "")
+            if isinstance(auth, dict) and auth.get("type") == "auth"
+            else ""
+        )
+        user_id = decode_access_token(token, JWT_SECRET) if token else None
+        with SessionLocal() as db:
+            user = db.get(User, user_id) if user_id else None
+            authorized = bool(user and user.is_active)
+        if not authorized:
+            await send({"type": "auth.error", "message": "登录状态无效或已过期"})
+            await websocket.close(code=1008)
+            return
+        await send({"type": "chat.ready"})
+
+        async def forward_events(
+            connection,
+            request_id: str,
+            pending,
+        ) -> None:
+            completed = False
+            try:
+                while True:
+                    event = await pending.events.get()
+                    await send({**event, "requestId": request_id})
+                    if event.get("type") in ("chat.complete", "chat.error"):
+                        completed = True
+                        break
+            finally:
+                if completed:
+                    relay.finish_chat(connection, request_id)
+                if completed and active.get("requestId") == request_id:
+                    active.clear()
+
+        while True:
+            payload = await websocket.receive_json()
+            if not isinstance(payload, dict):
+                await send({"type": "chat.error", "message": "聊天操作格式无效"})
+                continue
+            event_type = payload.get("type")
+            if event_type == "chat.start":
+                if active:
+                    await send({"type": "chat.error", "message": "上一条消息仍在处理中"})
+                    continue
+                try:
+                    message = MessageInput.model_validate(payload)
+                except ValidationError:
+                    await send({"type": "chat.error", "message": "消息内容无效"})
+                    continue
+                device_id = str(payload.get("deviceId") or "")
+                with SessionLocal() as db:
+                    device = db.get(Device, device_id)
+                    owned = bool(device and device.owner_user_id == user_id)
+                if not owned:
+                    await send({"type": "chat.error", "message": "主机不存在"})
+                    continue
+                if not relay.is_online(device_id):
+                    await send({"type": "chat.error", "message": "主机当前离线"})
+                    continue
+                try:
+                    connection, request_id, pending = await relay.start_chat(
+                        device_id,
+                        message.conversationId,
+                        message.text,
+                        stream=True,
+                    )
+                except HostOffline:
+                    await send({"type": "chat.error", "message": "主机连接已断开"})
+                    continue
+                active.update(
+                    {
+                        "deviceId": device_id,
+                        "requestId": request_id,
+                        "connection": connection,
+                    }
+                )
+                await send(
+                    {
+                        "type": "chat.started",
+                        "requestId": request_id,
+                        "clientMessageId": str(payload.get("clientMessageId") or ""),
+                    }
+                )
+                stream_task = asyncio.create_task(
+                    forward_events(connection, request_id, pending)
+                )
+            elif event_type == "chat.interaction.response":
+                request_id = str(payload.get("requestId") or "")
+                interaction_id = str(payload.get("interactionId") or "")
+                response = payload.get("response")
+                if request_id != active.get("requestId") or not interaction_id:
+                    await send({"type": "chat.error", "message": "这个操作已经失效"})
+                    continue
+                clean_response: dict[str, object]
+                if isinstance(response, dict) and response.get("cancelled") is True:
+                    clean_response = {"cancelled": True}
+                elif (
+                    isinstance(response, dict)
+                    and "confirmed" in response
+                    and isinstance(response["confirmed"], bool)
+                ):
+                    clean_response = {"confirmed": response["confirmed"]}
+                elif isinstance(response, dict) and isinstance(response.get("value"), str):
+                    clean_response = {"value": response["value"][:4000]}
+                else:
+                    await send({"type": "chat.error", "message": "选择结果无效"})
+                    continue
+                try:
+                    await relay.respond_interaction(
+                        str(active["deviceId"]),
+                        request_id,
+                        interaction_id,
+                        clean_response,
+                    )
+                except HostOffline:
+                    await send({"type": "chat.error", "message": "主机连接已断开"})
+            elif event_type == "chat.cancel" and active:
+                await relay.cancel_chat(
+                    str(active["deviceId"]), str(active["requestId"])
+                )
+            else:
+                await send({"type": "chat.error", "message": "不支持的聊天操作"})
+    except WebSocketDisconnect:
+        pass
+    finally:
+        if active:
+            await relay.cancel_chat(str(active["deviceId"]), str(active["requestId"]))
+        if stream_task:
+            if not stream_task.done():
+                stream_task.cancel()
+            await asyncio.gather(stream_task, return_exceptions=True)
+        connection = active.get("connection")
+        request_id = active.get("requestId")
+        if connection and request_id:
+            relay.finish_chat(connection, str(request_id))
 
 
 @app.post("/v1/devices/{device_id}/agent-config")

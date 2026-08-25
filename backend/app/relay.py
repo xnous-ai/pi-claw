@@ -15,6 +15,7 @@ class PendingRequest:
     future: asyncio.Future[dict]
     kind: str = "chat"
     chunks: list[str] = field(default_factory=list)
+    events: asyncio.Queue[dict] | None = None
 
 
 @dataclass
@@ -63,29 +64,84 @@ class Relay:
             except RuntimeError:
                 pass
 
-    async def request(self, device_id: str, conversation_id: str, text: str) -> dict:
+    async def start_chat(
+        self,
+        device_id: str,
+        conversation_id: str,
+        text: str,
+        stream: bool = False,
+    ) -> tuple[HostConnection, str, PendingRequest]:
         connection = self._hosts.get(device_id)
         if not connection:
             raise HostOffline
         request_id = str(uuid4())
-        pending = PendingRequest(asyncio.get_running_loop().create_future())
+        pending = PendingRequest(
+            asyncio.get_running_loop().create_future(),
+            events=asyncio.Queue() if stream else None,
+        )
         connection.pending[request_id] = pending
         try:
-            try:
-                async with connection.send_lock:
-                    await connection.websocket.send_json(
-                        {
-                            "type": "chat.request",
-                            "requestId": request_id,
-                            "conversationId": conversation_id,
-                            "text": text,
-                        }
-                    )
-            except (OSError, RuntimeError) as error:
-                raise HostOffline from error
+            async with connection.send_lock:
+                await connection.websocket.send_json(
+                    {
+                        "type": "chat.request",
+                        "requestId": request_id,
+                        "conversationId": conversation_id,
+                        "text": text,
+                    }
+                )
+        except (OSError, RuntimeError) as error:
+            connection.pending.pop(request_id, None)
+            raise HostOffline from error
+        return connection, request_id, pending
+
+    async def request(self, device_id: str, conversation_id: str, text: str) -> dict:
+        connection, request_id, pending = await self.start_chat(
+            device_id, conversation_id, text
+        )
+        try:
             return await asyncio.wait_for(pending.future, timeout=90)
         finally:
             connection.pending.pop(request_id, None)
+
+    def finish_chat(self, connection: HostConnection, request_id: str) -> None:
+        connection.pending.pop(request_id, None)
+
+    async def respond_interaction(
+        self,
+        device_id: str,
+        request_id: str,
+        interaction_id: str,
+        response: dict,
+    ) -> None:
+        connection = self._hosts.get(device_id)
+        pending = connection.pending.get(request_id) if connection else None
+        if not connection or not pending or pending.events is None:
+            raise HostOffline
+        try:
+            async with connection.send_lock:
+                await connection.websocket.send_json(
+                    {
+                        "type": "chat.interaction.response",
+                        "requestId": request_id,
+                        "interactionId": interaction_id,
+                        "response": response,
+                    }
+                )
+        except (OSError, RuntimeError) as error:
+            raise HostOffline from error
+
+    async def cancel_chat(self, device_id: str, request_id: str) -> None:
+        connection = self._hosts.get(device_id)
+        if not connection or request_id not in connection.pending:
+            return
+        try:
+            async with connection.send_lock:
+                await connection.websocket.send_json(
+                    {"type": "chat.cancel", "requestId": request_id}
+                )
+        except (OSError, RuntimeError):
+            pass
 
     async def configure_agent(
         self,
@@ -173,25 +229,56 @@ class Relay:
             return
         if payload.get("type") == "chat.delta" and pending.kind == "chat":
             pending.chunks.append(str(payload.get("delta", "")))
+            if pending.events is not None:
+                pending.events.put_nowait(
+                    {"type": "chat.delta", "delta": str(payload.get("delta", ""))}
+                )
+        elif payload.get("type") == "chat.status" and pending.events is not None:
+            pending.events.put_nowait(
+                {
+                    "type": "chat.status",
+                    "statusId": str(payload.get("statusId") or uuid4()),
+                    "label": str(payload.get("label") or "正在处理"),
+                    "state": str(payload.get("state") or "running"),
+                }
+            )
+        elif payload.get("type") == "chat.interaction" and pending.events is not None:
+            pending.events.put_nowait(
+                {
+                    "type": "chat.interaction",
+                    "interactionId": str(payload.get("interactionId") or uuid4()),
+                    "method": str(payload.get("method") or "select"),
+                    "title": str(payload.get("title") or "需要你的确认"),
+                    "message": str(payload.get("message") or ""),
+                    "options": [str(item) for item in payload.get("options", [])][:20],
+                    "placeholder": str(payload.get("placeholder") or ""),
+                }
+            )
         elif (
             payload.get("type") == "chat.complete"
             and pending.kind == "chat"
             and not pending.future.done()
         ):
-            pending.future.set_result(
-                {
-                    "id": str(payload.get("messageId") or uuid4()),
-                    "role": "assistant",
-                    "text": str(payload.get("text") or "".join(pending.chunks)),
-                    "createdAt": str(payload.get("createdAt") or datetime.now(UTC).isoformat()),
-                }
-            )
+            message = {
+                "id": str(payload.get("messageId") or uuid4()),
+                "role": "assistant",
+                "text": str(payload.get("text") or "".join(pending.chunks)),
+                "createdAt": str(payload.get("createdAt") or datetime.now(UTC).isoformat()),
+            }
+            if pending.events is not None:
+                pending.events.put_nowait({"type": "chat.complete", "message": message})
+            pending.future.set_result(message)
         elif (
             payload.get("type") == "chat.error"
             and pending.kind == "chat"
             and not pending.future.done()
         ):
-            pending.future.set_exception(RuntimeError(str(payload.get("message") or "Agent 执行失败")))
+            message = str(payload.get("message") or "Agent 执行失败")
+            if pending.events is not None:
+                pending.events.put_nowait({"type": "chat.error", "message": message})
+                pending.future.set_result({})
+            else:
+                pending.future.set_exception(RuntimeError(message))
         elif (
             payload.get("type") == "agent.configured"
             and pending.kind == "agent-config"
@@ -253,5 +340,12 @@ class Relay:
     @staticmethod
     def _fail_pending(connection: HostConnection) -> None:
         for pending in connection.pending.values():
-            if not pending.future.done():
+            if pending.future.done():
+                continue
+            if pending.events is not None:
+                pending.events.put_nowait(
+                    {"type": "chat.error", "message": "主机连接已断开"}
+                )
+                pending.future.set_result({})
+            else:
                 pending.future.set_exception(HostOffline())

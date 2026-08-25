@@ -251,6 +251,57 @@ class BackendFlowTest(unittest.TestCase):
                         }
                     )
                 )
+                stream_request = json.loads(await websocket.recv())
+                self.assertEqual(stream_request["type"], "chat.request")
+                await websocket.send(json.dumps({
+                    "type": "chat.status",
+                    "requestId": stream_request["requestId"],
+                    "statusId": "tool-1",
+                    "label": "正在查询资料",
+                    "state": "running",
+                }))
+                await websocket.send(json.dumps({
+                    "type": "chat.delta",
+                    "requestId": stream_request["requestId"],
+                    "delta": "我需要你",
+                }))
+                await websocket.send(json.dumps({
+                    "type": "chat.interaction",
+                    "requestId": stream_request["requestId"],
+                    "interactionId": "choice-1",
+                    "method": "select",
+                    "title": "选择执行方式",
+                    "message": "请选择下一步",
+                    "options": ["继续", "停止"],
+                }))
+                interaction_response = json.loads(await websocket.recv())
+                self.assertEqual(interaction_response["type"], "chat.interaction.response")
+                self.assertEqual(interaction_response["interactionId"], "choice-1")
+                self.assertEqual(interaction_response["response"], {"value": "继续"})
+                await websocket.send(json.dumps({
+                    "type": "chat.status",
+                    "requestId": stream_request["requestId"],
+                    "statusId": "tool-1",
+                    "label": "资料查询完成",
+                    "state": "done",
+                }))
+                await websocket.send(json.dumps({
+                    "type": "chat.delta",
+                    "requestId": stream_request["requestId"],
+                    "delta": "选择继续",
+                }))
+                await websocket.send(json.dumps({
+                    "type": "chat.complete",
+                    "requestId": stream_request["requestId"],
+                    "messageId": "reply-stream-1",
+                }))
+                cancelled_request = json.loads(await websocket.recv())
+                self.assertEqual(cancelled_request["type"], "chat.request")
+                cancel_message = json.loads(await websocket.recv())
+                self.assertEqual(cancel_message, {
+                    "type": "chat.cancel",
+                    "requestId": cancelled_request["requestId"],
+                })
                 capability_list = json.loads(await websocket.recv())
                 self.assertEqual(capability_list["type"], "capability.list")
                 await websocket.send(json.dumps({
@@ -339,6 +390,64 @@ class BackendFlowTest(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(reply["text"], "测试")
+
+        async def streamed_chat() -> list[dict]:
+            events = []
+            async with connect(f"ws://127.0.0.1:{self.port}/v1/chat/ws") as websocket:
+                await websocket.send(json.dumps({"type": "auth", "token": token}))
+                ready_message = json.loads(await websocket.recv())
+                self.assertEqual(ready_message["type"], "chat.ready")
+                await websocket.send(json.dumps({
+                    "type": "chat.start",
+                    "clientMessageId": "client-1",
+                    "deviceId": device["id"],
+                    "conversationId": "conversation-stream",
+                    "text": "请执行任务",
+                }))
+                while True:
+                    event = json.loads(await websocket.recv())
+                    events.append(event)
+                    if event["type"] == "chat.interaction":
+                        await websocket.send(json.dumps({
+                            "type": "chat.interaction.response",
+                            "requestId": event["requestId"],
+                            "interactionId": event["interactionId"],
+                            "response": {"value": "继续"},
+                        }))
+                    if event["type"] in ("chat.complete", "chat.error"):
+                        return events
+
+        stream_events = asyncio.run(streamed_chat())
+        self.assertEqual(
+            [event["type"] for event in stream_events],
+            [
+                "chat.started",
+                "chat.status",
+                "chat.delta",
+                "chat.interaction",
+                "chat.status",
+                "chat.delta",
+                "chat.complete",
+            ],
+        )
+        self.assertEqual(stream_events[3]["options"], ["继续", "停止"])
+        self.assertEqual(stream_events[-1]["message"]["text"], "我需要你选择继续")
+
+        async def disconnected_chat() -> None:
+            async with connect(f"ws://127.0.0.1:{self.port}/v1/chat/ws") as websocket:
+                await websocket.send(json.dumps({"type": "auth", "token": token}))
+                await websocket.recv()
+                await websocket.send(json.dumps({
+                    "type": "chat.start",
+                    "clientMessageId": "client-disconnect",
+                    "deviceId": device["id"],
+                    "conversationId": "conversation-disconnect",
+                    "text": "开始后断开",
+                }))
+                started = json.loads(await websocket.recv())
+                self.assertEqual(started["type"], "chat.started")
+
+        asyncio.run(disconnected_chat())
 
         status, unauthorized = http_json(f"{self.base}/v1/admin/overview")
         self.assertEqual(status, 401)

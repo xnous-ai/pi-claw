@@ -27,6 +27,42 @@ export type AgentMessage = {
   text: string;
   createdAt: string;
   error?: string;
+  interaction?: AgentInteraction;
+  status?: string;
+  steps?: AgentStep[];
+  streaming?: boolean;
+};
+
+export type AgentStep = {
+  id: string;
+  label: string;
+  state: 'running' | 'done' | 'error';
+};
+
+export type AgentInteraction = {
+  id: string;
+  method: 'select' | 'confirm' | 'input' | 'editor';
+  title: string;
+  message: string;
+  options: string[];
+  placeholder: string;
+  pending: boolean;
+  answer?: string;
+};
+
+export type InteractionResponse = {
+  value?: string;
+  confirmed?: boolean;
+  cancelled?: boolean;
+};
+
+export type AgentStreamHandlers = {
+  onDelta: (delta: string) => void;
+  onInteraction: (
+    interaction: AgentInteraction,
+    respond: (response: InteractionResponse) => void,
+  ) => void;
+  onStatus: (step: AgentStep) => void;
 };
 
 export type Conversation = {
@@ -502,28 +538,130 @@ export async function releaseDevice(token: string, deviceId: string) {
   );
 }
 
-export async function sendAgentMessage(
+export async function streamAgentMessage(
   token: string,
   deviceId: string,
   conversationId: string,
   text: string,
+  handlers: AgentStreamHandlers,
 ): Promise<AgentMessage> {
   if (isDemoMode) {
-    await delay(700);
+    handlers.onStatus({ id: 'demo', label: '正在整理回复', state: 'running' });
+    await delay(350);
+    handlers.onDelta('已收到你的消息。');
+    handlers.onStatus({ id: 'demo', label: '回复已生成', state: 'done' });
     return {
       id: `assistant-${Date.now()}`,
       role: 'assistant',
-      text: `已收到：“${text}”\n\n当前为演示模式。配置真实服务地址后，这里会显示 Pi agent 的回复。`,
+      text: '已收到你的消息。',
       createdAt: new Date().toISOString(),
     };
   }
-  const message = await request<AgentMessage>(
-    `/v1/devices/${encodeURIComponent(deviceId)}/messages`,
-    { method: 'POST', body: JSON.stringify({ conversationId, text }) },
-    token,
-  );
-  if (!message?.id || message.role !== 'assistant' || !message.text) {
-    throw new Error('Agent 服务返回了无效消息');
-  }
-  return message;
+
+  const websocketUrl = `${API_URL!.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:')}/v1/chat/ws`;
+  return new Promise<AgentMessage>((resolve, reject) => {
+    const socket = new WebSocket(websocketUrl);
+    const clientMessageId = `client-${Date.now()}`;
+    let accumulated = '';
+    let settled = false;
+    const connectionTimer = setTimeout(() => {
+      finishWithError('连接聊天服务超时');
+    }, 15_000);
+
+    function close() {
+      clearTimeout(connectionTimer);
+      if (socket.readyState === 0 || socket.readyState === 1) socket.close();
+    }
+
+    function finishWithError(message: string) {
+      if (settled) return;
+      settled = true;
+      close();
+      reject(new Error(message));
+    }
+
+    socket.onopen = () => {
+      socket.send(JSON.stringify({ type: 'auth', token }));
+    };
+    socket.onerror = () => finishWithError('无法连接聊天服务');
+    socket.onclose = () => {
+      if (!settled) finishWithError('聊天连接已断开');
+    };
+    socket.onmessage = (event) => {
+      let payload: Record<string, any>;
+      try {
+        payload = JSON.parse(String(event.data));
+      } catch {
+        finishWithError('聊天服务返回了无效数据');
+        return;
+      }
+      if (payload.type === 'chat.ready') {
+        clearTimeout(connectionTimer);
+        socket.send(JSON.stringify({
+          type: 'chat.start',
+          clientMessageId,
+          deviceId,
+          conversationId,
+          text,
+        }));
+      } else if (payload.type === 'chat.delta') {
+        const delta = String(payload.delta || '');
+        accumulated += delta;
+        if (delta) handlers.onDelta(delta);
+      } else if (payload.type === 'chat.status') {
+        const state = ['running', 'done', 'error'].includes(payload.state)
+          ? payload.state as AgentStep['state']
+          : 'running';
+        handlers.onStatus({
+          id: String(payload.statusId || `status-${Date.now()}`),
+          label: String(payload.label || '正在处理'),
+          state,
+        });
+      } else if (payload.type === 'chat.interaction') {
+        const supportedMethods = ['select', 'confirm', 'input', 'editor'] as const;
+        const method = supportedMethods.includes(payload.method)
+          ? payload.method as AgentInteraction['method']
+          : 'select';
+        handlers.onInteraction(
+          {
+            id: String(payload.interactionId || ''),
+            method,
+            title: String(payload.title || '需要你的确认'),
+            message: String(payload.message || ''),
+            options: Array.isArray(payload.options)
+              ? payload.options.map(String).slice(0, 8)
+              : [],
+            placeholder: String(payload.placeholder || ''),
+            pending: true,
+          },
+          (response) => {
+            if (socket.readyState !== 1 || !payload.requestId) return;
+            socket.send(JSON.stringify({
+              type: 'chat.interaction.response',
+              requestId: payload.requestId,
+              interactionId: payload.interactionId,
+              response,
+            }));
+          },
+        );
+      } else if (payload.type === 'chat.complete') {
+        const message = payload.message || {};
+        const finalText = String(message.text || accumulated);
+        if (!message.id || !finalText) {
+          finishWithError('Agent 服务返回了无效消息');
+          return;
+        }
+        settled = true;
+        close();
+        resolve({
+          id: String(message.id),
+          role: 'assistant',
+          text: finalText,
+          createdAt: String(message.createdAt || new Date().toISOString()),
+        });
+      } else if (payload.type === 'chat.error' || payload.type === 'auth.error') {
+        finishWithError(String(payload.message || 'Agent 执行失败'));
+      }
+    };
+  });
 }

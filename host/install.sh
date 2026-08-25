@@ -58,6 +58,7 @@ fi
 install -m 0644 "$SCRIPT_DIR/daemon.py" /opt/clawpi/daemon.py
 install -m 0644 "$SCRIPT_DIR/simulator.py" /opt/clawpi/simulator.py
 install -m 0644 "$SCRIPT_DIR/requirements.txt" /opt/clawpi/requirements.txt
+install -o clawpi -g clawpi -m 0644 "$SCRIPT_DIR/clawpi-interaction.ts" /var/lib/clawpi/pi-config/extensions/clawpi-interaction.ts
 python3 -m venv --clear /opt/clawpi/venv
 /opt/clawpi/venv/bin/pip install --disable-pip-version-check --no-cache-dir -r /opt/clawpi/requirements.txt
 npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@$PI_VERSION"
