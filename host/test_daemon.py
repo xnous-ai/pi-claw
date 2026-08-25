@@ -237,6 +237,7 @@ class ProvisioningTest(unittest.TestCase):
         script = Path(__file__).with_name("install.sh").read_text(encoding="utf-8")
         self.assertIn("install -d -o root -g clawpi -m 0770 /var/lib/clawpi", script)
         self.assertIn("chown root:clawpi /var/lib/clawpi", script)
+        self.assertIn("chmod 0660 /var/lib/clawpi/agent.json", script)
 
     def test_allows_only_one_wifi_refresh_at_a_time(self) -> None:
         started = threading.Event()
@@ -303,7 +304,7 @@ class ProvisioningTest(unittest.TestCase):
             )
             self.assertEqual(load_agent_config(path), saved)
             if os.name != "nt":
-                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(path.stat().st_mode & 0o777, 0o660)
             with patch.dict(os.environ, {}, clear=False):
                 apply_agent_config(saved)
                 self.assertEqual(os.environ["ANTHROPIC_API_KEY"], "sk-ant-test")

@@ -50,6 +50,10 @@ if [ -f /var/lib/clawpi/credentials.json ]; then
     chown root:clawpi /var/lib/clawpi/credentials.json
     chmod 0600 /var/lib/clawpi/credentials.json
 fi
+if [ -f /var/lib/clawpi/agent.json ]; then
+    chown clawpi:clawpi /var/lib/clawpi/agent.json
+    chmod 0660 /var/lib/clawpi/agent.json
+fi
 
 install -m 0644 "$SCRIPT_DIR/daemon.py" /opt/clawpi/daemon.py
 install -m 0644 "$SCRIPT_DIR/simulator.py" /opt/clawpi/simulator.py

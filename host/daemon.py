@@ -410,7 +410,7 @@ def save_agent_config(path: Path, config: dict, owner: str = "") -> dict:
     saved = {"provider": provider, "apiKey": api_key, "model": model}
     path.write_text(json.dumps(saved, indent=2), encoding="utf-8")
     if os.name != "nt":
-        path.chmod(0o600)
+        path.chmod(0o660)
         if owner and os.geteuid() == 0:
             user = pwd.getpwnam(owner)
             os.chown(path, user.pw_uid, user.pw_gid)
