@@ -1,17 +1,25 @@
 import asyncio
+import hashlib
+import io
+import json
 import os
 import re
+import secrets
+import zipfile
 from datetime import timedelta
+from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect, status
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import create_engine, delete, select
+from sqlalchemy import create_engine, delete, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from .models import Base, Device, ProvisioningSession, User, utcnow
+from .models import Base, Capability, Device, ProvisioningSession, User, utcnow
 from .relay import HostOffline, Relay
 from .security import (
     create_access_token,
@@ -24,6 +32,8 @@ from .security import (
 
 DATABASE_URL = os.getenv("CLAWPI_DATABASE_URL", "sqlite:///./clawpi.db")
 JWT_SECRET = os.getenv("CLAWPI_JWT_SECRET", "clawpi-local-development-secret-change-me")
+ADMIN_KEY = os.getenv("CLAWPI_ADMIN_KEY", "")
+ARTIFACT_DIR = Path(os.getenv("CLAWPI_ARTIFACT_DIR", "./capability-artifacts"))
 
 engine = create_engine(
     DATABASE_URL,
@@ -32,21 +42,53 @@ engine = create_engine(
 SessionLocal = sessionmaker(engine, expire_on_commit=False)
 Base.metadata.create_all(engine)
 
+
+def ensure_compatible_schema() -> None:
+    columns = {column["name"] for column in inspect(engine).get_columns("users")}
+    with engine.begin() as connection:
+        if "phone" not in columns:
+            connection.execute(text("ALTER TABLE users ADD COLUMN phone VARCHAR(32)"))
+        if "is_active" not in columns:
+            default = "TRUE" if engine.dialect.name == "postgresql" else "1"
+            connection.execute(
+                text(f"ALTER TABLE users ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT {default}")
+            )
+        rows = connection.execute(text("SELECT id, email, phone FROM users")).mappings()
+        for row in rows:
+            if row["phone"]:
+                continue
+            local_part = str(row["email"] or "").split("@", 1)[0]
+            phone = (
+                local_part
+                if re.fullmatch(r"1[3-9]\d{9}", local_part)
+                else f"legacy-{str(row['id'])[:24]}"
+            )
+            connection.execute(
+                text("UPDATE users SET phone = :phone WHERE id = :id"),
+                {"phone": phone, "id": row["id"]},
+            )
+        connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_phone ON users (phone)"))
+
+
+ensure_compatible_schema()
+
 app = FastAPI(title="ClawPi Control Plane", version="0.1.0")
 relay = Relay()
 bearer = HTTPBearer(auto_error=False)
 
 
 class AuthInput(BaseModel):
-    email: str
+    phone: str
     password: str = Field(min_length=8, max_length=128)
 
-    @field_validator("email")
+    @field_validator("phone")
     @classmethod
-    def normalize_email(cls, value: str) -> str:
-        value = value.strip().lower()
-        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value):
-            raise ValueError("邮箱格式无效")
+    def normalize_phone(cls, value: str) -> str:
+        value = re.sub(r"[\s-]", "", value)
+        if value.startswith("+86"):
+            value = value[3:]
+        if not re.fullmatch(r"1[3-9]\d{9}", value):
+            raise ValueError("请输入有效的中国大陆手机号")
         return value
 
 
@@ -88,6 +130,36 @@ class AgentConfigInput(BaseModel):
     apiKey: str | None = Field(default=None, min_length=8, max_length=4096)
 
 
+class CapabilityInput(BaseModel):
+    id: str = Field(min_length=2, max_length=80, pattern=r"^[a-z0-9][a-z0-9._-]*$")
+    name: str = Field(min_length=1, max_length=120)
+    kind: Literal["skill", "extension"]
+    description: str = Field(default="", max_length=4000)
+    version: str = Field(min_length=1, max_length=80)
+    source: str = Field(default="", max_length=500)
+    permissions: list[str] = Field(default_factory=list, max_length=20)
+    enabled: bool = False
+
+
+class AdminUserInput(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    phone: str
+    isActive: bool = True
+
+    @field_validator("phone")
+    @classmethod
+    def normalize_phone(cls, value: str) -> str:
+        return AuthInput.normalize_phone(value)
+
+
+class AdminPasswordInput(BaseModel):
+    newPassword: str = Field(min_length=8, max_length=128)
+
+
+class AdminDeviceInput(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
 def get_db():
     with SessionLocal() as db:
         yield db
@@ -103,11 +175,33 @@ def get_current_user(
     user = db.get(User, user_id) if user_id else None
     if not user:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "登录状态无效或已过期")
+    if not user.is_active:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "账号已停用")
     return user
 
 
+def require_admin(x_admin_key: str | None = Header(default=None, alias="X-Admin-Key")) -> None:
+    if not ADMIN_KEY:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "管理后台尚未配置")
+    if not x_admin_key or not secrets.compare_digest(x_admin_key, ADMIN_KEY):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "管理密钥无效")
+
+
 def user_json(user: User) -> dict:
-    return {"id": user.id, "name": user.name, "email": user.email}
+    return {
+        "id": user.id,
+        "name": user.name,
+        "phone": "" if user.phone.startswith("legacy-") else user.phone,
+    }
+
+
+def admin_user_json(user: User, device_count: int = 0) -> dict:
+    return {
+        **user_json(user),
+        "isActive": user.is_active,
+        "deviceCount": device_count,
+        "createdAt": user.created_at.isoformat() + "Z",
+    }
 
 
 def device_json(device: Device) -> dict:
@@ -119,6 +213,64 @@ def device_json(device: Device) -> dict:
         "version": device.version,
         "lastSeenAt": (device.last_seen_at or device.created_at).isoformat() + "Z",
     }
+
+
+def capability_json(capability: Capability) -> dict:
+    try:
+        permissions = json.loads(capability.permissions_json)
+    except json.JSONDecodeError:
+        permissions = []
+    return {
+        "id": capability.id,
+        "name": capability.name,
+        "kind": capability.kind,
+        "description": capability.description,
+        "version": capability.version,
+        "source": capability.source or "",
+        "permissions": permissions if isinstance(permissions, list) else [],
+        "enabled": capability.enabled,
+        "artifactAvailable": bool(capability.artifact_file and capability.artifact_sha256),
+        "artifactSha256": capability.artifact_sha256 or "",
+        "updatedAt": capability.updated_at.isoformat() + "Z",
+    }
+
+
+def apply_capability_input(capability: Capability, payload: CapabilityInput) -> None:
+    source = payload.source.strip()
+    if payload.kind == "extension" and not source:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "插件必须填写 npm 或 Git 来源")
+    if source and not source.startswith(("npm:", "git:", "https://", "http://", "ssh://")):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "能力来源只支持 npm 或 Git 地址")
+    capability.name = payload.name.strip()
+    capability.kind = payload.kind
+    capability.description = payload.description.strip()
+    capability.version = payload.version.strip()
+    capability.source = source or None
+    capability.permissions_json = json.dumps(
+        [item.strip() for item in payload.permissions if item.strip()], ensure_ascii=False
+    )
+    capability.enabled = payload.enabled
+    capability.updated_at = utcnow()
+
+
+def validate_skill_archive(data: bytes) -> None:
+    if len(data) > 10 * 1024 * 1024:
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "Skill 安装包不能超过 10 MB")
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            files = [item for item in archive.infolist() if not item.is_dir()]
+            if not files or len(files) > 300:
+                raise ValueError("文件数量无效")
+            if sum(item.file_size for item in files) > 30 * 1024 * 1024:
+                raise ValueError("解压后文件过大")
+            if not any(Path(item.filename).name == "SKILL.md" for item in files):
+                raise ValueError("缺少 SKILL.md")
+            for item in files:
+                path = Path(item.filename)
+                if path.is_absolute() or ".." in path.parts:
+                    raise ValueError("包含不安全路径")
+    except (zipfile.BadZipFile, ValueError) as error:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Skill 安装包无效：{error}")
 
 
 def auth_json(user: User, db: Session) -> dict:
@@ -142,12 +294,243 @@ def health() -> dict:
     return {"status": "ok"}
 
 
+@app.get("/admin", response_class=HTMLResponse)
+def admin_page() -> str:
+    return Path(__file__).with_name("admin.html").read_text(encoding="utf-8")
+
+
+@app.get("/v1/admin/overview", dependencies=[Depends(require_admin)])
+def admin_overview(db: Session = Depends(get_db)) -> dict:
+    users = db.scalars(select(User)).all()
+    devices = db.scalars(select(Device)).all()
+    capabilities = db.scalars(select(Capability)).all()
+    return {
+        "users": len(users),
+        "activeUsers": sum(user.is_active for user in users),
+        "devices": len(devices),
+        "onlineDevices": sum(relay.is_online(device.id) for device in devices),
+        "capabilities": len(capabilities),
+        "publishedCapabilities": sum(capability.enabled for capability in capabilities),
+    }
+
+
+@app.get("/v1/admin/users", dependencies=[Depends(require_admin)])
+def admin_list_users(q: str = "", db: Session = Depends(get_db)) -> list[dict]:
+    users = db.scalars(select(User).order_by(User.created_at.desc())).all()
+    query = q.strip().lower()
+    if query:
+        users = [user for user in users if query in user.name.lower() or query in user.phone]
+    devices = db.scalars(select(Device)).all()
+    counts: dict[str, int] = {}
+    for device in devices:
+        if device.owner_user_id:
+            counts[device.owner_user_id] = counts.get(device.owner_user_id, 0) + 1
+    return [admin_user_json(user, counts.get(user.id, 0)) for user in users]
+
+
+@app.put("/v1/admin/users/{user_id}", dependencies=[Depends(require_admin)])
+def admin_update_user(
+    user_id: str,
+    payload: AdminUserInput,
+    db: Session = Depends(get_db),
+) -> dict:
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "账号不存在")
+    user.name = payload.name.strip()
+    user.phone = payload.phone
+    if user.legacy_email.endswith("@phone.clawpi.local"):
+        user.legacy_email = f"{payload.phone}@phone.clawpi.local"
+    user.is_active = payload.isActive
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "该手机号已经注册")
+    device_count = len(
+        db.scalars(select(Device).where(Device.owner_user_id == user.id)).all()
+    )
+    return admin_user_json(user, device_count)
+
+
+@app.post("/v1/admin/users/{user_id}/password", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_admin)])
+def admin_reset_password(
+    user_id: str,
+    payload: AdminPasswordInput,
+    db: Session = Depends(get_db),
+) -> None:
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "账号不存在")
+    user.password_hash = hash_secret(payload.newPassword)
+    db.commit()
+
+
+@app.delete("/v1/admin/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_admin)])
+async def admin_delete_user(user_id: str, db: Session = Depends(get_db)) -> None:
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "账号不存在")
+    devices = db.scalars(select(Device).where(Device.owner_user_id == user.id)).all()
+    for device in devices:
+        device.owner_user_id = None
+        device.host_secret_hash = None
+    db.execute(delete(ProvisioningSession).where(ProvisioningSession.user_id == user.id))
+    db.delete(user)
+    db.commit()
+    for device in devices:
+        await relay.drop(device.id)
+
+
+@app.get("/v1/admin/devices", dependencies=[Depends(require_admin)])
+def admin_list_devices(q: str = "", db: Session = Depends(get_db)) -> list[dict]:
+    devices = db.scalars(select(Device).order_by(Device.created_at.desc())).all()
+    users = {user.id: user for user in db.scalars(select(User)).all()}
+    query = q.strip().lower()
+    result = []
+    for device in devices:
+        owner = users.get(device.owner_user_id or "")
+        item = {
+            **device_json(device),
+            "owner": user_json(owner) if owner else None,
+            "createdAt": device.created_at.isoformat() + "Z",
+        }
+        searchable = f"{device.name} {device.serial} {owner.name if owner else ''} {owner.phone if owner else ''}".lower()
+        if not query or query in searchable:
+            result.append(item)
+    return result
+
+
+@app.put("/v1/admin/devices/{device_id}", dependencies=[Depends(require_admin)])
+def admin_update_device(
+    device_id: str,
+    payload: AdminDeviceInput,
+    db: Session = Depends(get_db),
+) -> dict:
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "主机不存在")
+    device.name = payload.name.strip()
+    db.commit()
+    return device_json(device)
+
+
+@app.delete("/v1/admin/devices/{device_id}/claim", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_admin)])
+async def admin_release_device(device_id: str, db: Session = Depends(get_db)) -> None:
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "主机不存在")
+    device.owner_user_id = None
+    device.host_secret_hash = None
+    db.commit()
+    await relay.drop(device.id)
+
+
+@app.get("/v1/admin/capabilities", dependencies=[Depends(require_admin)])
+def admin_list_capabilities(db: Session = Depends(get_db)) -> list[dict]:
+    capabilities = db.scalars(select(Capability).order_by(Capability.updated_at.desc())).all()
+    return [capability_json(capability) for capability in capabilities]
+
+
+@app.post("/v1/admin/capabilities", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)])
+def admin_create_capability(
+    payload: CapabilityInput,
+    db: Session = Depends(get_db),
+) -> dict:
+    if db.get(Capability, payload.id):
+        raise HTTPException(status.HTTP_409_CONFLICT, "能力 ID 已存在")
+    capability = Capability(id=payload.id)
+    apply_capability_input(capability, payload)
+    if capability.enabled and not capability.source:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "上传 Skill 安装包后才能发布")
+    db.add(capability)
+    db.commit()
+    return capability_json(capability)
+
+
+@app.put("/v1/admin/capabilities/{capability_id}", dependencies=[Depends(require_admin)])
+def admin_update_capability(
+    capability_id: str,
+    payload: CapabilityInput,
+    db: Session = Depends(get_db),
+) -> dict:
+    if payload.id != capability_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "能力 ID 不能修改")
+    capability = db.get(Capability, capability_id)
+    if not capability:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "能力不存在")
+    apply_capability_input(capability, payload)
+    if capability.enabled and not capability.source and not capability.artifact_file:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "上传 Skill 安装包后才能发布")
+    db.commit()
+    return capability_json(capability)
+
+
+@app.put("/v1/admin/capabilities/{capability_id}/artifact", dependencies=[Depends(require_admin)])
+async def admin_upload_capability_artifact(
+    capability_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    capability = db.get(Capability, capability_id)
+    if not capability:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "能力不存在")
+    if capability.kind != "skill":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "只有 Skill 支持上传 ZIP 安装包")
+    data = await request.body()
+    validate_skill_archive(data)
+    ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+    filename = f"{capability.id}-{uuid4().hex}.zip"
+    path = ARTIFACT_DIR / filename
+    path.write_bytes(data)
+    previous = ARTIFACT_DIR / capability.artifact_file if capability.artifact_file else None
+    capability.artifact_file = filename
+    capability.artifact_sha256 = hashlib.sha256(data).hexdigest()
+    capability.updated_at = utcnow()
+    db.commit()
+    if previous and previous != path:
+        previous.unlink(missing_ok=True)
+    return capability_json(capability)
+
+
+@app.delete("/v1/admin/capabilities/{capability_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_admin)])
+def admin_delete_capability(capability_id: str, db: Session = Depends(get_db)) -> None:
+    capability = db.get(Capability, capability_id)
+    if not capability:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "能力不存在")
+    artifact = ARTIFACT_DIR / capability.artifact_file if capability.artifact_file else None
+    db.delete(capability)
+    db.commit()
+    if artifact:
+        artifact.unlink(missing_ok=True)
+
+
+@app.get("/v1/capabilities", dependencies=[Depends(get_current_user)])
+def list_capabilities(db: Session = Depends(get_db)) -> list[dict]:
+    capabilities = db.scalars(
+        select(Capability).where(Capability.enabled.is_(True)).order_by(Capability.name)
+    ).all()
+    return [capability_json(capability) for capability in capabilities]
+
+
+@app.get("/v1/capabilities/{capability_id}/artifact")
+def download_capability_artifact(capability_id: str, db: Session = Depends(get_db)) -> FileResponse:
+    capability = db.get(Capability, capability_id)
+    if not capability or not capability.enabled or not capability.artifact_file:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "安装包不存在")
+    path = ARTIFACT_DIR / capability.artifact_file
+    if not path.is_file():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "安装包文件不存在")
+    return FileResponse(path, media_type="application/zip", filename=f"{capability.id}-{capability.version}.zip")
+
+
 @app.post("/v1/auth/register", status_code=status.HTTP_201_CREATED)
 def register(payload: RegisterInput, db: Session = Depends(get_db)) -> dict:
     user = User(
         id=str(uuid4()),
         name=payload.name.strip(),
-        email=payload.email,
+        phone=payload.phone,
+        legacy_email=f"{payload.phone}@phone.clawpi.local",
         password_hash=hash_secret(payload.password),
     )
     db.add(user)
@@ -155,15 +538,17 @@ def register(payload: RegisterInput, db: Session = Depends(get_db)) -> dict:
         db.commit()
     except IntegrityError:
         db.rollback()
-        raise HTTPException(status.HTTP_409_CONFLICT, "该邮箱已经注册")
+        raise HTTPException(status.HTTP_409_CONFLICT, "该手机号已经注册")
     return auth_json(user, db)
 
 
 @app.post("/v1/auth/login")
 def login(payload: AuthInput, db: Session = Depends(get_db)) -> dict:
-    user = db.scalar(select(User).where(User.email == payload.email))
+    user = db.scalar(select(User).where(User.phone == payload.phone))
     if not user or not verify_secret(payload.password, user.password_hash):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "邮箱或密码错误")
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "手机号或密码错误")
+    if not user.is_active:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "账号已停用")
     return auth_json(user, db)
 
 
@@ -357,6 +742,97 @@ async def get_agent_config(
         raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, "读取主机配置超时")
     except RuntimeError as error:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(error))
+
+
+async def capability_request(device_id: str, action: str, data: dict | None = None) -> dict:
+    try:
+        return await relay.capability(device_id, action, data)
+    except HostOffline:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "主机连接已断开")
+    except TimeoutError:
+        raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, "主机能力操作超时")
+    except RuntimeError as error:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(error))
+
+
+@app.get("/v1/devices/{device_id}/capabilities")
+async def get_device_capabilities(
+    device_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    device = owned_device(device_id, user, db)
+    if not relay.is_online(device.id):
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "主机当前离线")
+    response = await capability_request(device.id, "list")
+    installed_items = response.get("installed", [])
+    installed = {
+        str(item.get("id")): item
+        for item in installed_items
+        if isinstance(item, dict) and item.get("id")
+    }
+    capabilities = db.scalars(
+        select(Capability).where(Capability.enabled.is_(True)).order_by(Capability.name)
+    ).all()
+    result = []
+    for capability in capabilities:
+        current = installed.pop(capability.id, None)
+        result.append(
+            {
+                **capability_json(capability),
+                "installed": current is not None,
+                "installedVersion": str(current.get("version", "")) if current else "",
+            }
+        )
+    for item in installed.values():
+        result.append(
+            {
+                "id": str(item.get("id", "")),
+                "name": str(item.get("name") or item.get("id") or "已下架能力"),
+                "kind": str(item.get("kind") or "skill"),
+                "description": "该能力已从商店下架，可以继续使用或卸载。",
+                "version": str(item.get("version", "")),
+                "source": "",
+                "permissions": [],
+                "enabled": False,
+                "artifactAvailable": False,
+                "artifactSha256": "",
+                "updatedAt": "",
+                "installed": True,
+                "installedVersion": str(item.get("version", "")),
+            }
+        )
+    return result
+
+
+@app.post("/v1/devices/{device_id}/capabilities/{capability_id}")
+async def install_device_capability(
+    device_id: str,
+    capability_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    device = owned_device(device_id, user, db)
+    capability = db.get(Capability, capability_id)
+    if not capability or not capability.enabled:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "能力不存在或已下架")
+    if not capability.source and not capability.artifact_file:
+        raise HTTPException(status.HTTP_409_CONFLICT, "能力安装包尚未上传")
+    data = capability_json(capability)
+    if capability.artifact_file:
+        data["artifactPath"] = f"/v1/capabilities/{capability.id}/artifact"
+    return await capability_request(device.id, "install", {"capability": data})
+
+
+@app.delete("/v1/devices/{device_id}/capabilities/{capability_id}")
+async def remove_device_capability(
+    device_id: str,
+    capability_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    device = owned_device(device_id, user, db)
+    return await capability_request(device.id, "remove", {"capabilityId": capability_id})
 
 
 @app.websocket("/v1/hosts/{device_id}/ws")

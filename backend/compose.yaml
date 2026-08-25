@@ -7,6 +7,8 @@ services:
     environment:
       CLAWPI_DATABASE_URL: sqlite:////data/clawpi.db
       CLAWPI_JWT_SECRET: ${CLAWPI_JWT_SECRET:?CLAWPI_JWT_SECRET is required}
+      CLAWPI_ADMIN_KEY: ${CLAWPI_ADMIN_KEY:?CLAWPI_ADMIN_KEY is required}
+      CLAWPI_ARTIFACT_DIR: /data/capability-artifacts
     ports:
       - "127.0.0.1:18081:8000"
     volumes:

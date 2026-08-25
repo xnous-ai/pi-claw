@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -17,8 +17,10 @@ class User(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     name: Mapped[str] = mapped_column(String(80))
-    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    phone: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    legacy_email: Mapped[str] = mapped_column("email", String(320), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(256))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
@@ -47,3 +49,20 @@ class ProvisioningSession(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class Capability(Base):
+    __tablename__ = "capabilities"
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    name: Mapped[str] = mapped_column(String(120))
+    kind: Mapped[str] = mapped_column(String(20), index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    version: Mapped[str] = mapped_column(String(80))
+    source: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    permissions_json: Mapped[str] = mapped_column(Text, default="[]")
+    artifact_file: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    artifact_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

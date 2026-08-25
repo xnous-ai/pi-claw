@@ -21,12 +21,15 @@ import {
   configureDeviceNetwork,
   getDevice,
   getDeviceAgentConfig,
+  getDeviceCapabilities,
+  installDeviceCapability,
   isDemoMode,
   login,
   prepareDeviceProvisioning,
   register,
   refreshHostWifiNetworks,
   releaseDevice,
+  removeDeviceCapability,
   scanHostWifiNetworks,
   sendAgentMessage,
   type AgentProvider,
@@ -37,6 +40,7 @@ import {
   type AuthSession,
   type Conversation,
   type Device,
+  type DeviceCapability,
   type DeviceProvisioning,
   type WifiNetwork,
 } from './src/api';
@@ -55,6 +59,7 @@ type Route =
   | { name: 'chat'; conversationId: string }
   | { name: 'device'; deviceId: string }
   | { name: 'agent-config'; deviceId: string }
+  | { name: 'capabilities'; deviceId: string }
   | { name: 'add-device' }
   | { name: 'profile-detail'; page: ProfilePage };
 
@@ -220,7 +225,7 @@ function Field({
   onChangeText: (value: string) => void;
   placeholder: string;
   secureTextEntry?: boolean;
-  keyboardType?: 'default' | 'email-address';
+  keyboardType?: 'default' | 'email-address' | 'phone-pad';
 }) {
   return (
     <View style={styles.fieldGroup}>
@@ -418,23 +423,23 @@ function BootScreen() {
 function AuthScreen({ onAuthenticated }: { onAuthenticated: (session: AuthSession) => void }) {
   const [mode, setMode] = useState<'login' | 'register'>('login');
   const [name, setName] = useState('');
-  const [email, setEmail] = useState('');
+  const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
   async function submit() {
-    const normalizedEmail = email.trim().toLowerCase();
+    const normalizedPhone = phone.replace(/[\s-]/g, '').replace(/^\+86/, '');
     if (mode === 'register' && !name.trim()) return setError('请输入你的称呼');
-    if (!/^\S+@\S+\.\S+$/.test(normalizedEmail)) return setError('请输入有效的邮箱地址');
+    if (!/^1[3-9]\d{9}$/.test(normalizedPhone)) return setError('请输入有效的中国大陆手机号');
     if (password.length < 8) return setError('密码至少需要 8 位');
 
     setError('');
     setLoading(true);
     try {
       const next = mode === 'login'
-        ? await login(normalizedEmail, password)
-        : await register(name.trim(), normalizedEmail, password);
+        ? await login(normalizedPhone, password)
+        : await register(name.trim(), normalizedPhone, password);
       await saveSession(next);
       onAuthenticated(next);
     } catch (requestError) {
@@ -454,11 +459,11 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (session: AuthSessio
           </View>
           <Text style={styles.authTitle}>{mode === 'login' ? '欢迎回来' : '创建账号'}</Text>
           <Text style={styles.authSubtitle}>
-            {mode === 'login' ? '登录后管理你的 AI 主机与会话。' : '使用购买主机时预留的邮箱创建账号。'}
+            {mode === 'login' ? '登录后管理你的 AI 主机与会话。' : '使用手机号创建你的 ClawPi 账号。'}
           </Text>
           <View style={styles.formBlock}>
             {mode === 'register' && <Field label="称呼" onChangeText={setName} placeholder="怎么称呼你" value={name} />}
-            <Field keyboardType="email-address" label="邮箱" onChangeText={setEmail} placeholder="name@example.com" value={email} />
+            <Field keyboardType="phone-pad" label="手机号" onChangeText={setPhone} placeholder="请输入 11 位手机号" value={phone} />
             <Field label="密码" onChangeText={setPassword} placeholder="至少 8 位" secureTextEntry value={password} />
             {!!error && <Text style={styles.errorText}>{error}</Text>}
             <PrimaryButton label={mode === 'login' ? '登录' : '创建账号'} loading={loading} onPress={submit} />
@@ -1016,6 +1021,7 @@ function DeviceDetailScreen({
   device,
   refreshing,
   onBack,
+  onCapabilities,
   onConfigure,
   onRefresh,
   onRelease,
@@ -1023,6 +1029,7 @@ function DeviceDetailScreen({
   device: Device;
   refreshing: boolean;
   onBack: () => void;
+  onCapabilities: () => void;
   onConfigure: () => void;
   onRefresh: () => void;
   onRelease: () => void;
@@ -1060,6 +1067,13 @@ function DeviceDetailScreen({
             label="模型服务"
             onPress={onConfigure}
             value={device.agentProvider ?? '设置'}
+          />
+          <View style={styles.settingsDivider} />
+          <SettingsRow
+            icon="extension"
+            label="能力管理"
+            onPress={onCapabilities}
+            value="Skill 与插件"
           />
         </View>
         <Pressable accessibilityRole="button" onPress={onRelease} style={({ pressed }) => [styles.dangerAction, pressed && styles.pressed]}>
@@ -1192,6 +1206,147 @@ function AgentConfigScreen({
   );
 }
 
+function CapabilityScreen({
+  device,
+  onBack,
+  onLoad,
+  onInstall,
+  onRemove,
+}: {
+  device: Device;
+  onBack: () => void;
+  onLoad: () => Promise<DeviceCapability[]>;
+  onInstall: (capabilityId: string) => Promise<void>;
+  onRemove: (capabilityId: string) => Promise<void>;
+}) {
+  const [capabilities, setCapabilities] = useState<DeviceCapability[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busyId, setBusyId] = useState('');
+  const [error, setError] = useState('');
+
+  async function load() {
+    setError('');
+    setLoading(true);
+    try {
+      setCapabilities(await onLoad());
+    } catch (loadError) {
+      setError(errorMessage(loadError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { load(); }, [device.id]);
+
+  async function install(capability: DeviceCapability) {
+    setBusyId(capability.id);
+    setError('');
+    try {
+      await onInstall(capability.id);
+      await load();
+    } catch (installError) {
+      setError(errorMessage(installError));
+    } finally {
+      setBusyId('');
+    }
+  }
+
+  function confirmRemove(capability: DeviceCapability) {
+    Alert.alert('卸载这个能力？', `${capability.name} 将从 ${device.name} 中移除。`, [
+      { text: '取消', style: 'cancel' },
+      {
+        text: '卸载',
+        style: 'destructive',
+        onPress: async () => {
+          setBusyId(capability.id);
+          setError('');
+          try {
+            await onRemove(capability.id);
+            await load();
+          } catch (removeError) {
+            setError(errorMessage(removeError));
+          } finally {
+            setBusyId('');
+          }
+        },
+      },
+    ]);
+  }
+
+  return (
+    <View style={styles.fullPage}>
+      <PageHeader
+        action={<IconButton disabled={loading || !!busyId} icon="refresh" label="刷新能力" onPress={load} />}
+        onBack={onBack}
+        subtitle={device.name}
+        title="能力管理"
+      />
+      <ScrollView contentContainerStyle={styles.listContent}>
+        {device.status !== 'online' && <Text style={styles.capabilityWarning}>主机离线，暂时不能安装或卸载能力。</Text>}
+        {!!error && <Text style={styles.errorText}>{error}</Text>}
+        {loading ? (
+          <View style={styles.capabilityLoading}>
+            <ActivityIndicator color={colors.accent} size="small" />
+            <Text style={styles.configLoadingText}>正在读取主机能力</Text>
+          </View>
+        ) : !capabilities.length ? (
+          <View style={styles.emptyState}>
+            <View style={styles.emptyIcon}><Icon color={colors.accent} name="extension" size={32} /></View>
+            <Text style={styles.emptyTitle}>暂无可用能力</Text>
+            <Text style={styles.emptyText}>管理员发布 Skill 或插件后会显示在这里。</Text>
+          </View>
+        ) : (
+          <View style={styles.listSurface}>
+            {capabilities.map((capability, index) => {
+              const updating = capability.installed && capability.installedVersion !== capability.version;
+              return (
+                <View key={capability.id} style={[styles.capabilityRow, index < capabilities.length - 1 && styles.rowDivider]}>
+                  <View style={styles.capabilityIcon}>
+                    <Icon color={capability.kind === 'skill' ? colors.accent : colors.teal} name={capability.kind === 'skill' ? 'bolt' : 'extension'} size={23} />
+                  </View>
+                  <View style={styles.capabilityCopy}>
+                    <View style={styles.capabilityTitleRow}>
+                      <Text numberOfLines={1} style={styles.capabilityTitle}>{capability.name}</Text>
+                      <Text style={[styles.capabilityStatus, capability.installed && styles.capabilityStatusInstalled]}>
+                        {capability.installed ? '已安装' : capability.kind === 'skill' ? 'Skill' : '插件'}
+                      </Text>
+                    </View>
+                    {!!capability.description && <Text style={styles.capabilityDescription}>{capability.description}</Text>}
+                    <Text style={styles.capabilityMeta}>
+                      v{capability.version}{capability.permissions.length ? ` · ${capability.permissions.join(' · ')}` : ''}
+                    </Text>
+                    <View style={styles.capabilityActions}>
+                      <Pressable
+                        accessibilityRole="button"
+                        disabled={!!busyId || device.status !== 'online' || (!capability.enabled && !capability.installed)}
+                        onPress={() => capability.installed && !updating ? confirmRemove(capability) : install(capability)}
+                        style={({ pressed }) => [
+                          styles.capabilityButton,
+                          capability.installed && !updating && styles.capabilityRemoveButton,
+                          (!!busyId || device.status !== 'online') && styles.buttonDisabled,
+                          pressed && styles.pressed,
+                        ]}
+                      >
+                        {busyId === capability.id ? (
+                          <ActivityIndicator color={capability.installed && !updating ? colors.danger : colors.accent} size="small" />
+                        ) : (
+                          <Text style={[styles.capabilityButtonText, capability.installed && !updating && styles.capabilityRemoveText]}>
+                            {updating ? '更新' : capability.installed ? '卸载' : '安装'}
+                          </Text>
+                        )}
+                      </Pressable>
+                    </View>
+                  </View>
+                </View>
+              );
+            })}
+          </View>
+        )}
+      </ScrollView>
+    </View>
+  );
+}
+
 function SettingsRow({
   icon,
   label,
@@ -1222,7 +1377,7 @@ function ProfileScreen({ session, onOpen, onSignOut }: { session: AuthSession; o
           <View style={styles.profileAvatar}><Text style={styles.profileAvatarText}>{session.user.name.slice(0, 1).toUpperCase()}</Text></View>
           <View style={styles.profileCopy}>
             <Text style={styles.profileName}>{session.user.name}</Text>
-            <Text style={styles.profileEmail}>{session.user.email}</Text>
+            <Text style={styles.profileEmail}>{session.user.phone || '待设置手机号'}</Text>
           </View>
           <ModeBadge />
         </View>
@@ -1269,7 +1424,7 @@ function ProfileDetailScreen({ page, session, onBack }: { page: ProfilePage; ses
         {page === 'account' && (
           <View style={styles.detailSurface}>
             <DetailRow label="称呼" value={session.user.name} />
-            <DetailRow label="登录邮箱" value={session.user.email} />
+            <DetailRow label="登录手机号" value={session.user.phone || '待设置'} />
             <DetailRow label="账号 ID" value={session.user.id} />
             <DetailRow label="已绑定主机" value={`${session.devices.length} 台`} />
           </View>
@@ -1351,7 +1506,10 @@ function MainScreen({
   onAddDevice,
   onCreateConversation,
   onConfigureDevice,
+  onInstallCapability,
+  onLoadCapabilities,
   onLoadDeviceConfig,
+  onRemoveCapability,
   onRefreshDevice,
   onReleaseDevice,
   onSend,
@@ -1363,7 +1521,10 @@ function MainScreen({
   onAddDevice: (device: Device) => Promise<void>;
   onCreateConversation: (deviceId: string) => Promise<Conversation>;
   onConfigureDevice: (deviceId: string, provider: AgentProvider, apiKey: string | undefined, model: string) => Promise<AgentConfiguration>;
+  onInstallCapability: (deviceId: string, capabilityId: string) => Promise<void>;
+  onLoadCapabilities: (deviceId: string) => Promise<DeviceCapability[]>;
   onLoadDeviceConfig: (deviceId: string) => Promise<AgentConfiguration>;
+  onRemoveCapability: (deviceId: string, capabilityId: string) => Promise<void>;
   onRefreshDevice: (deviceId: string) => Promise<void>;
   onReleaseDevice: (deviceId: string) => Promise<void>;
   onSend: (conversationId: string, text: string) => Promise<void>;
@@ -1431,6 +1592,7 @@ function MainScreen({
       <DeviceDetailScreen
         device={device}
         onBack={() => setRoute({ name: 'root' })}
+        onCapabilities={() => setRoute({ name: 'capabilities', deviceId: device.id })}
         onConfigure={() => setRoute({ name: 'agent-config', deviceId: device.id })}
         onRefresh={async () => {
           setRefreshing(true);
@@ -1454,6 +1616,17 @@ function MainScreen({
         onBack={() => setRoute({ name: 'device', deviceId: device.id })}
         onLoad={() => onLoadDeviceConfig(device.id)}
         onSave={(provider, apiKey, model) => onConfigureDevice(device.id, provider, apiKey, model)}
+      />
+    ) : null;
+  } else if (route.name === 'capabilities') {
+    const device = session.devices.find((item) => item.id === route.deviceId);
+    content = device ? (
+      <CapabilityScreen
+        device={device}
+        onBack={() => setRoute({ name: 'device', deviceId: device.id })}
+        onInstall={(capabilityId) => onInstallCapability(device.id, capabilityId)}
+        onLoad={() => onLoadCapabilities(device.id)}
+        onRemove={(capabilityId) => onRemoveCapability(device.id, capabilityId)}
       />
     ) : null;
   } else if (route.name === 'add-device') {
@@ -1589,6 +1762,21 @@ function AppContent() {
     return config;
   }
 
+  async function loadCapabilities(deviceId: string) {
+    if (!session) throw new Error('登录状态已失效');
+    return getDeviceCapabilities(session.token, deviceId);
+  }
+
+  async function installCapability(deviceId: string, capabilityId: string) {
+    if (!session) throw new Error('登录状态已失效');
+    await installDeviceCapability(session.token, deviceId, capabilityId);
+  }
+
+  async function removeCapability(deviceId: string, capabilityId: string) {
+    if (!session) throw new Error('登录状态已失效');
+    await removeDeviceCapability(session.token, deviceId, capabilityId);
+  }
+
   async function unbindDevice(deviceId: string) {
     if (!session) return;
     await releaseDevice(session.token, deviceId);
@@ -1680,7 +1868,10 @@ function AppContent() {
       onAddDevice={addDevice}
       onConfigureDevice={configureAgent}
       onCreateConversation={createConversation}
+      onInstallCapability={installCapability}
+      onLoadCapabilities={loadCapabilities}
       onLoadDeviceConfig={loadAgentConfig}
+      onRemoveCapability={removeCapability}
       onRefreshDevice={refreshDevice}
       onReleaseDevice={unbindDevice}
       onSend={sendMessage}
@@ -1846,6 +2037,22 @@ const styles = StyleSheet.create({
   detailValue: { color: colors.ink, flex: 1, fontSize: 14, fontWeight: '600', marginLeft: 22, textAlign: 'right' },
   dangerAction: { alignItems: 'center', borderColor: colors.danger, borderRadius: 8, borderWidth: 1, flexDirection: 'row', height: 52, justifyContent: 'center', marginTop: 24 },
   dangerActionText: { color: colors.danger, fontSize: 15, fontWeight: '700', marginLeft: 8 },
+  capabilityWarning: { backgroundColor: colors.warningSoft, borderRadius: 8, color: colors.warning, fontSize: 13, lineHeight: 19, marginBottom: 14, padding: 12 },
+  capabilityLoading: { alignItems: 'center', flexDirection: 'row', justifyContent: 'center', minHeight: 180 },
+  capabilityRow: { alignItems: 'flex-start', flexDirection: 'row', minHeight: 146, padding: 15 },
+  capabilityIcon: { alignItems: 'center', backgroundColor: colors.accentSoft, borderRadius: 8, height: 42, justifyContent: 'center', marginRight: 12, width: 42 },
+  capabilityCopy: { flex: 1, minWidth: 0 },
+  capabilityTitleRow: { alignItems: 'center', flexDirection: 'row' },
+  capabilityTitle: { color: colors.ink, flex: 1, fontSize: 16, fontWeight: '700', marginRight: 8 },
+  capabilityStatus: { backgroundColor: colors.background, borderRadius: 6, color: colors.muted, fontSize: 11, overflow: 'hidden', paddingHorizontal: 7, paddingVertical: 4 },
+  capabilityStatusInstalled: { backgroundColor: colors.successSoft, color: colors.success },
+  capabilityDescription: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 7 },
+  capabilityMeta: { color: colors.subtle, fontSize: 11, lineHeight: 17, marginTop: 6 },
+  capabilityActions: { alignItems: 'flex-end', marginTop: 10 },
+  capabilityButton: { alignItems: 'center', borderColor: colors.accent, borderRadius: 8, borderWidth: 1, height: 36, justifyContent: 'center', minWidth: 72, paddingHorizontal: 14 },
+  capabilityRemoveButton: { borderColor: colors.danger },
+  capabilityButtonText: { color: colors.accent, fontSize: 13, fontWeight: '700' },
+  capabilityRemoveText: { color: colors.danger },
   profileIdentity: { alignItems: 'center', flexDirection: 'row', marginBottom: 28, paddingHorizontal: 4, paddingVertical: 8 },
   profileAvatar: { alignItems: 'center', backgroundColor: colors.ink, borderRadius: 8, height: 58, justifyContent: 'center', width: 58 },
   profileAvatarText: { color: colors.surface, fontSize: 23, fontWeight: '800' },

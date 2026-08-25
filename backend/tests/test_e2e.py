@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -21,12 +22,20 @@ def free_port() -> int:
         return sock.getsockname()[1]
 
 
-def http_json(url: str, method: str = "GET", payload: dict | None = None, token: str | None = None):
+def http_json(
+    url: str,
+    method: str = "GET",
+    payload: dict | None = None,
+    token: str | None = None,
+    admin_key: str | None = None,
+):
     headers = {"Accept": "application/json"}
     if payload is not None:
         headers["Content-Type"] = "application/json"
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    if admin_key:
+        headers["X-Admin-Key"] = admin_key
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode() if payload is not None else None,
@@ -47,10 +56,25 @@ class BackendFlowTest(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.port = free_port()
         self.base = f"http://127.0.0.1:{self.port}"
+        database_path = Path(self.tempdir.name, "test.db")
+        with sqlite3.connect(database_path) as database:
+            database.execute(
+                """
+                CREATE TABLE users (
+                    id VARCHAR(36) NOT NULL PRIMARY KEY,
+                    name VARCHAR(80) NOT NULL,
+                    email VARCHAR(320) NOT NULL UNIQUE,
+                    password_hash VARCHAR(256) NOT NULL,
+                    created_at DATETIME NOT NULL
+                )
+                """
+            )
         env = {
             **os.environ,
-            "CLAWPI_DATABASE_URL": f"sqlite:///{Path(self.tempdir.name, 'test.db').as_posix()}",
+            "CLAWPI_DATABASE_URL": f"sqlite:///{database_path.as_posix()}",
             "CLAWPI_JWT_SECRET": "test-secret-not-for-production",
+            "CLAWPI_ADMIN_KEY": "test-admin-key",
+            "CLAWPI_ARTIFACT_DIR": str(Path(self.tempdir.name, "artifacts")),
             "PYTHONDONTWRITEBYTECODE": "1",
         }
         self.server = subprocess.Popen(
@@ -91,12 +115,17 @@ class BackendFlowTest(unittest.TestCase):
         self.tempdir.cleanup()
 
     def test_register_bind_relay_and_release(self) -> None:
+        with urllib.request.urlopen(f"{self.base}/admin", timeout=5) as response:
+            self.assertEqual(response.status, 200)
+            self.assertIn("账号管理", response.read().decode("utf-8"))
+
         status, session = http_json(
             f"{self.base}/v1/auth/register",
             "POST",
-            {"name": "测试用户", "email": "user@example.com", "password": "password123"},
+            {"name": "测试用户", "phone": "13800138000", "password": "password123"},
         )
         self.assertEqual(status, 201)
+        self.assertEqual(session["user"]["phone"], "13800138000")
         self.assertEqual(session["devices"], [])
         token = session["token"]
 
@@ -134,7 +163,7 @@ class BackendFlowTest(unittest.TestCase):
         _, other_session = http_json(
             f"{self.base}/v1/auth/register",
             "POST",
-            {"name": "其他用户", "email": "other@example.com", "password": "password123"},
+            {"name": "其他用户", "phone": "13900139000", "password": "password123"},
         )
         status, _ = http_json(
             f"{self.base}/v1/devices/{device['id']}", token=other_session["token"]
@@ -222,7 +251,33 @@ class BackendFlowTest(unittest.TestCase):
                         }
                     )
                 )
-                await asyncio.sleep(0.2)
+                capability_list = json.loads(await websocket.recv())
+                self.assertEqual(capability_list["type"], "capability.list")
+                await websocket.send(json.dumps({
+                    "type": "capability.result",
+                    "requestId": capability_list["requestId"],
+                    "data": {"installed": []},
+                }))
+                capability_install = json.loads(await websocket.recv())
+                self.assertEqual(capability_install["type"], "capability.install")
+                self.assertEqual(capability_install["capability"]["id"], "test-extension")
+                await websocket.send(json.dumps({
+                    "type": "capability.result",
+                    "requestId": capability_install["requestId"],
+                    "data": {"installed": [{
+                        "id": "test-extension",
+                        "name": "测试插件",
+                        "kind": "extension",
+                        "version": "1.0.0",
+                    }]},
+                }))
+                capability_remove = json.loads(await websocket.recv())
+                self.assertEqual(capability_remove["type"], "capability.remove")
+                await websocket.send(json.dumps({
+                    "type": "capability.result",
+                    "requestId": capability_remove["requestId"],
+                    "data": {"installed": []},
+                }))
 
         host = threading.Thread(target=lambda: asyncio.run(fake_host()), daemon=True)
         host.start()
@@ -284,6 +339,62 @@ class BackendFlowTest(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(reply["text"], "测试")
+
+        status, unauthorized = http_json(f"{self.base}/v1/admin/overview")
+        self.assertEqual(status, 401)
+        self.assertEqual(unauthorized["detail"], "管理密钥无效")
+        status, users = http_json(
+            f"{self.base}/v1/admin/users?q=13800138000",
+            admin_key="test-admin-key",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(users[0]["phone"], "13800138000")
+        status, admin_devices = http_json(
+            f"{self.base}/v1/admin/devices?q=CP-TEST-001",
+            admin_key="test-admin-key",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(admin_devices[0]["owner"]["phone"], "13800138000")
+
+        capability_payload = {
+            "id": "test-extension",
+            "name": "测试插件",
+            "kind": "extension",
+            "description": "测试能力安装链路",
+            "version": "1.0.0",
+            "source": "npm:test-extension@1.0.0",
+            "permissions": ["网络访问"],
+            "enabled": True,
+        }
+        status, capability = http_json(
+            f"{self.base}/v1/admin/capabilities",
+            "POST",
+            capability_payload,
+            admin_key="test-admin-key",
+        )
+        self.assertEqual(status, 201)
+        self.assertTrue(capability["enabled"])
+
+        status, catalog = http_json(
+            f"{self.base}/v1/devices/{device['id']}/capabilities",
+            token=token,
+        )
+        self.assertEqual(status, 200)
+        self.assertFalse(catalog[0]["installed"])
+        status, installed = http_json(
+            f"{self.base}/v1/devices/{device['id']}/capabilities/test-extension",
+            "POST",
+            token=token,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(installed["installed"][0]["id"], "test-extension")
+        status, removed = http_json(
+            f"{self.base}/v1/devices/{device['id']}/capabilities/test-extension",
+            "DELETE",
+            token=token,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(removed["installed"], [])
         host.join(timeout=5)
 
         status, _ = http_json(

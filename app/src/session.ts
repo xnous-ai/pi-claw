@@ -8,7 +8,8 @@ const SESSION_KEY = 'clawpi.auth.session';
 const MESSAGES_KEY = 'clawpi.chat.messages';
 const CONVERSATIONS_KEY = 'clawpi.chat.conversations';
 
-type StoredSession = Omit<AuthSession, 'token' | 'devices'> & {
+type StoredSession = Omit<AuthSession, 'token' | 'devices' | 'user'> & {
+  user: AuthSession['user'] & { email?: string; phone?: string };
   devices?: Device[];
   device?: Device | null;
 };
@@ -36,7 +37,13 @@ export async function loadSession(): Promise<AuthSession | null> {
       : stored.device
         ? [stored.device]
         : [];
-    return { token, user: stored.user, devices };
+    const legacyPhone = stored.user.email?.split('@', 1)[0] ?? '';
+    const phone = stored.user.phone ?? (/^1[3-9]\d{9}$/.test(legacyPhone) ? legacyPhone : '');
+    return {
+      token,
+      user: { id: stored.user.id, name: stored.user.name, phone },
+      devices,
+    };
   } catch {
     await clearSession();
     return null;

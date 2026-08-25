@@ -2,14 +2,22 @@ import argparse
 import asyncio
 import contextlib
 import hashlib
+import io
 import json
 import os
 import queue
+import re
+import shutil
+import stat
 import subprocess
+import tempfile
 import threading
 import time
+import urllib.request
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urljoin
 from uuid import uuid4
 
 from websockets.asyncio.client import connect
@@ -804,11 +812,210 @@ async def handle_agent_config_query(
         )
 
 
+def load_capability_state(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    return [item for item in value if isinstance(item, dict) and item.get("id")] if isinstance(value, list) else []
+
+
+def save_capability_state(path: Path, capabilities: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(capabilities, ensure_ascii=False, indent=2), encoding="utf-8")
+    if os.name != "nt":
+        temporary.chmod(0o600)
+    temporary.replace(path)
+
+
+def download_skill(server: str, artifact_path: str, expected_sha256: str) -> bytes:
+    url = urljoin(f"{server.rstrip('/')}/", artifact_path.lstrip("/"))
+    with urllib.request.urlopen(url, timeout=45) as response:
+        data = response.read(10 * 1024 * 1024 + 1)
+    if len(data) > 10 * 1024 * 1024:
+        raise ValueError("Skill 安装包超过 10 MB")
+    if hashlib.sha256(data).hexdigest() != expected_sha256:
+        raise ValueError("Skill 安装包校验失败")
+    return data
+
+
+def install_skill(capability: dict, server: str, skills_dir: Path) -> None:
+    capability_id = str(capability.get("id", ""))
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{1,79}", capability_id):
+        raise ValueError("能力 ID 无效")
+    artifact_path = str(capability.get("artifactPath", ""))
+    expected_sha256 = str(capability.get("artifactSha256", ""))
+    if not artifact_path or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        raise ValueError("Skill 安装信息不完整")
+    data = download_skill(server, artifact_path, expected_sha256)
+    skills_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=skills_dir) as temporary:
+        unpacked = Path(temporary) / "unpacked"
+        unpacked.mkdir()
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            files = [item for item in archive.infolist() if not item.is_dir()]
+            if len(files) > 300 or sum(item.file_size for item in files) > 30 * 1024 * 1024:
+                raise ValueError("Skill 安装包内容过大")
+            for item in files:
+                relative = Path(item.filename)
+                mode = item.external_attr >> 16
+                if relative.is_absolute() or ".." in relative.parts or stat.S_ISLNK(mode):
+                    raise ValueError("Skill 安装包包含不安全路径")
+                target = unpacked / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(item) as source, target.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+        manifests = list(unpacked.rglob("SKILL.md"))
+        if len(manifests) != 1:
+            raise ValueError("Skill 安装包必须包含一个 SKILL.md")
+        staged = skills_dir / f".{capability_id}-{uuid4().hex}.new"
+        shutil.copytree(manifests[0].parent, staged)
+        destination = skills_dir / capability_id
+        backup = skills_dir / f".{capability_id}.old"
+        shutil.rmtree(backup, ignore_errors=True)
+        if destination.exists():
+            destination.replace(backup)
+        try:
+            staged.replace(destination)
+        except Exception:
+            if backup.exists():
+                backup.replace(destination)
+            raise
+        shutil.rmtree(backup, ignore_errors=True)
+
+
+def run_pi_package(pi_command: str, action: str, source: str) -> None:
+    if not source.startswith(("npm:", "git:", "https://", "http://", "ssh://")):
+        raise ValueError("插件来源只允许 npm 或 Git 地址")
+    result = subprocess.run(
+        [pi_command, action, source],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    if result.returncode:
+        detail = result.stderr.strip() or result.stdout.strip() or "Pi 插件操作失败"
+        raise RuntimeError(detail[-1000:])
+
+
+def install_capability(
+    capability: dict,
+    server: str,
+    pi_command: str,
+    capability_state: Path,
+    skills_dir: Path,
+) -> list[dict]:
+    kind = str(capability.get("kind", ""))
+    source = str(capability.get("source", ""))
+    if kind == "skill" and capability.get("artifactPath"):
+        install_skill(capability, server, skills_dir)
+    elif source:
+        run_pi_package(pi_command, "install", source)
+    else:
+        raise ValueError("能力缺少安装来源")
+    installed = [item for item in load_capability_state(capability_state) if item["id"] != capability["id"]]
+    installed.append(
+        {
+            "id": capability["id"],
+            "name": capability.get("name") or capability["id"],
+            "kind": kind,
+            "version": capability.get("version", ""),
+            "source": source,
+            "installedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+    )
+    save_capability_state(capability_state, installed)
+    return installed
+
+
+def remove_capability(
+    capability_id: str,
+    pi_command: str,
+    capability_state: Path,
+    skills_dir: Path,
+) -> list[dict]:
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{1,79}", capability_id):
+        raise ValueError("能力 ID 无效")
+    installed = load_capability_state(capability_state)
+    current = next((item for item in installed if item["id"] == capability_id), None)
+    if not current:
+        return installed
+    if current.get("source"):
+        run_pi_package(pi_command, "remove", str(current["source"]))
+    else:
+        shutil.rmtree(skills_dir / capability_id, ignore_errors=True)
+    remaining = [item for item in installed if item["id"] != capability_id]
+    save_capability_state(capability_state, remaining)
+    return remaining
+
+
+async def handle_capability(
+    websocket,
+    message: dict,
+    server: str,
+    pi_command: str,
+    capability_state: Path,
+    skills_dir: Path,
+) -> None:
+    request_id = str(message.get("requestId", ""))
+    try:
+        if not request_id:
+            raise ValueError("能力请求无效")
+        action = str(message.get("type", "")).removeprefix("capability.")
+        if action == "list":
+            installed = load_capability_state(capability_state)
+        elif action == "install":
+            capability = message.get("capability")
+            if not isinstance(capability, dict):
+                raise ValueError("能力安装信息无效")
+            installed = await asyncio.to_thread(
+                install_capability,
+                capability,
+                server,
+                pi_command,
+                capability_state,
+                skills_dir,
+            )
+        elif action == "remove":
+            installed = await asyncio.to_thread(
+                remove_capability,
+                str(message.get("capabilityId", "")),
+                pi_command,
+                capability_state,
+                skills_dir,
+            )
+        else:
+            raise ValueError("不支持的能力操作")
+        await websocket.send(
+            json.dumps(
+                {"type": "capability.result", "requestId": request_id, "data": {"installed": installed}},
+                ensure_ascii=False,
+            )
+        )
+    except Exception as error:
+        await websocket.send(
+            json.dumps(
+                {
+                    "type": "capability.error",
+                    "requestId": request_id,
+                    "message": str(error)[:1000] or "能力操作失败",
+                },
+                ensure_ascii=False,
+            )
+        )
+
+
 async def run_host(
     server: str,
     credentials: dict,
     agent: PiRpcAgent,
     agent_config_path: Path,
+    capability_state: Path,
+    skills_dir: Path,
     timeout: int,
 ) -> None:
     delay = 1
@@ -834,6 +1041,15 @@ async def run_host(
                             await handle_agent_config_query(
                                 websocket, message, agent, agent_config_path
                             )
+                        elif str(message.get("type", "")).startswith("capability."):
+                            await handle_capability(
+                                websocket,
+                                message,
+                                server,
+                                agent.command,
+                                capability_state,
+                                skills_dir,
+                            )
                 finally:
                     heartbeat_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
@@ -855,6 +1071,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--version", default=os.getenv("CLAWPI_VERSION", "ClawPi OS 0.1.0"))
     parser.add_argument("--credentials", type=Path, default=state_dir / "credentials.json")
     parser.add_argument("--agent-config", type=Path, default=state_dir / "agent.json")
+    parser.add_argument("--capability-state", type=Path, default=state_dir / "capabilities.json")
     parser.add_argument("--sessions", type=Path, default=state_dir / "sessions")
     parser.add_argument("--workspace", type=Path, default=state_dir / "workspace")
     parser.add_argument("--setup-host", default="0.0.0.0")
@@ -877,6 +1094,7 @@ def main() -> None:
     args = parse_args()
     args.credentials.parent.mkdir(parents=True, exist_ok=True)
     args.agent_config.parent.mkdir(parents=True, exist_ok=True)
+    args.capability_state.parent.mkdir(parents=True, exist_ok=True)
     args.sessions.mkdir(parents=True, exist_ok=True)
     args.workspace.mkdir(parents=True, exist_ok=True)
     agent_config = load_agent_config(args.agent_config)
@@ -958,7 +1176,15 @@ def main() -> None:
         ),
     )
     asyncio.run(
-        run_host(args.server, credentials, agent, args.agent_config, args.agent_timeout)
+        run_host(
+            args.server,
+            credentials,
+            agent,
+            args.agent_config,
+            args.capability_state,
+            Path(os.getenv("PI_CODING_AGENT_DIR", "/var/lib/clawpi/pi-config")) / "skills",
+            args.agent_timeout,
+        )
     )
 
 

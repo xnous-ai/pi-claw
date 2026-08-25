@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import io
 import json
 import os
 import sys
@@ -7,6 +9,7 @@ import textwrap
 import threading
 import unittest
 import urllib.request
+import zipfile
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import AsyncMock, patch
@@ -20,6 +23,9 @@ from daemon import (
     handle_agent_configuration,
     handle_agent_config_query,
     handle_chat,
+    install_capability,
+    install_skill,
+    load_capability_state,
     load_agent_config,
     message_text,
     refresh_hotspot_networks,
@@ -331,9 +337,57 @@ class ProvisioningTest(unittest.TestCase):
                         {"deviceId": "device-1", "hostToken": "token"},
                         agent,
                         root / "agent.json",
+                        root / "capabilities.json",
+                        root / "skills",
                         1,
                     )
                 )
+
+    def test_installs_reviewed_skill_archive(self) -> None:
+        archive_buffer = io.BytesIO()
+        with zipfile.ZipFile(archive_buffer, "w") as archive:
+            archive.writestr("web-search/SKILL.md", "# Web search")
+            archive.writestr("web-search/reference.txt", "reference")
+        data = archive_buffer.getvalue()
+        capability = {
+            "id": "web-search",
+            "name": "网页搜索",
+            "kind": "skill",
+            "version": "1.0.0",
+            "artifactPath": "/v1/capabilities/web-search/artifact",
+            "artifactSha256": hashlib.sha256(data).hexdigest(),
+        }
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "daemon.download_skill", return_value=data
+        ):
+            root = Path(directory)
+            state = root / "capabilities.json"
+            installed = install_capability(
+                capability,
+                "https://cloud.local",
+                "pi",
+                state,
+                root / "skills",
+            )
+            self.assertEqual(installed[0]["id"], "web-search")
+            self.assertTrue((root / "skills" / "web-search" / "SKILL.md").is_file())
+            self.assertEqual(load_capability_state(state)[0]["version"], "1.0.0")
+
+    def test_rejects_unsafe_skill_archive(self) -> None:
+        archive_buffer = io.BytesIO()
+        with zipfile.ZipFile(archive_buffer, "w") as archive:
+            archive.writestr("SKILL.md", "# Unsafe")
+            archive.writestr("../outside.txt", "no")
+        data = archive_buffer.getvalue()
+        capability = {
+            "id": "unsafe-skill",
+            "artifactPath": "/unsafe.zip",
+            "artifactSha256": hashlib.sha256(data).hexdigest(),
+        }
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "daemon.download_skill", return_value=data
+        ), self.assertRaisesRegex(ValueError, "不安全路径"):
+            install_skill(capability, "https://cloud.local", Path(directory) / "skills")
 
     def test_saves_and_applies_agent_config(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

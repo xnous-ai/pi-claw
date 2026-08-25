@@ -40,7 +40,7 @@ node -e 'const [major, minor] = process.versions.node.split(".").map(Number); pr
 id clawpi >/dev/null 2>&1 || useradd --system --home-dir /var/lib/clawpi --shell /usr/sbin/nologin clawpi
 install -d -m 0755 /opt/clawpi
 install -d -o root -g clawpi -m 0770 /var/lib/clawpi
-install -d -o clawpi -g clawpi -m 0750 /var/lib/clawpi/workspace /var/lib/clawpi/sessions /var/lib/clawpi/pi-config
+install -d -o clawpi -g clawpi -m 0750 /var/lib/clawpi/workspace /var/lib/clawpi/sessions /var/lib/clawpi/pi-config /var/lib/clawpi/pi-config/skills /var/lib/clawpi/pi-config/extensions
 install -d -m 0750 /etc/clawpi
 chown root:clawpi /var/lib/clawpi
 chmod 0770 /var/lib/clawpi

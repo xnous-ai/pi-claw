@@ -1,6 +1,6 @@
 # ClawPi FastAPI Backend
 
-ClawPi 的账号、设备控制面和实时中继。聊天正文和模型 API Key 均不写入数据库，Pi agent 运行在 AI 主机上。
+ClawPi 的手机号账号、设备控制面、能力商店和实时中继。聊天正文和模型 API Key 均不写入数据库，Pi agent 运行在 AI 主机上。
 
 ## 本地运行
 
@@ -9,12 +9,14 @@ cd backend
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e .
 $env:CLAWPI_JWT_SECRET = "replace-with-a-long-random-secret"
+$env:CLAWPI_ADMIN_KEY = "replace-with-a-separate-admin-key"
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
 ```
 
 默认使用当前目录的 `clawpi.db`。服务启动后可访问：
 
 - API：`http://127.0.0.1:8000`
+- 管理后台：`http://127.0.0.1:8000/admin`
 - OpenAPI：`http://127.0.0.1:8000/docs`
 - 健康检查：`http://127.0.0.1:8000/health`
 
@@ -37,6 +39,12 @@ $env:CLAWPI_DATABASE_URL = "postgresql+psycopg://user:password@127.0.0.1/clawpi"
 
 模型 API Key 会经过 FastAPI 进程内存和主机 WebSocket，但不落库、不写日志。更新同一服务商的模型时可以省略 `apiKey`；更换服务商时主机会要求提供新 Key。生产环境必须使用 HTTPS/WSS。
 
+## 管理后台
+
+访问 `/admin` 后输入独立的 `CLAWPI_ADMIN_KEY`。后台可搜索和管理手机号账号、停用账号、重置密码、查看或解绑主机，以及发布 Skill/插件。Skill 以包含 `SKILL.md` 的 ZIP 上传；插件来源填写 Pi 支持的 `npm:` 或 `git:` 包地址。只有后台发布的能力才会显示在 App 中。
+
+旧版本邮箱账号会在服务启动时自动迁移。邮箱用户名如果本身是手机号会直接沿用；其他旧账号会显示为“待设置手机号”，需要管理员在后台补录后才能用手机号重新登录。
+
 主机模拟器和后续真实守护程序位于 `host/`，运行方式见 [host/README.md](../host/README.md)。
 
 ## 测试
@@ -45,4 +53,4 @@ $env:CLAWPI_DATABASE_URL = "postgresql+psycopg://user:password@127.0.0.1/clawpi"
 .\.venv\Scripts\python.exe -B -m unittest discover -s tests -v
 ```
 
-测试覆盖注册、一次性令牌、跨账号隔离、自动绑定、模型配置转发、无 Key 模型更新、主机 WebSocket 上线、消息往返和解绑。
+测试覆盖手机号注册、管理权限、账号与主机查询、一次性令牌、跨账号隔离、自动绑定、模型配置转发、能力安装转发、主机 WebSocket 上线、消息往返和解绑。

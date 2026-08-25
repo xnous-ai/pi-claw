@@ -137,6 +137,29 @@ class Relay:
         finally:
             connection.pending.pop(request_id, None)
 
+    async def capability(self, device_id: str, action: str, data: dict | None = None) -> dict:
+        connection = self._hosts.get(device_id)
+        if not connection:
+            raise HostOffline
+        request_id = str(uuid4())
+        pending = PendingRequest(asyncio.get_running_loop().create_future(), kind="capability")
+        connection.pending[request_id] = pending
+        try:
+            try:
+                async with connection.send_lock:
+                    await connection.websocket.send_json(
+                        {
+                            "type": f"capability.{action}",
+                            "requestId": request_id,
+                            **(data or {}),
+                        }
+                    )
+            except (OSError, RuntimeError) as error:
+                raise HostOffline from error
+            return await asyncio.wait_for(pending.future, timeout=120)
+        finally:
+            connection.pending.pop(request_id, None)
+
     async def handle(self, connection: HostConnection, payload: dict) -> None:
         request_id = payload.get("requestId")
         pending = connection.pending.get(request_id)
@@ -207,6 +230,19 @@ class Relay:
             and not pending.future.done()
         ):
             pending.future.set_exception(RuntimeError(str(payload.get("message") or "Agent 配置失败")))
+        elif (
+            payload.get("type") == "capability.result"
+            and pending.kind == "capability"
+            and not pending.future.done()
+        ):
+            data = payload.get("data")
+            pending.future.set_result(data if isinstance(data, dict) else {})
+        elif (
+            payload.get("type") == "capability.error"
+            and pending.kind == "capability"
+            and not pending.future.done()
+        ):
+            pending.future.set_exception(RuntimeError(str(payload.get("message") or "能力操作失败")))
 
     @staticmethod
     def _fail_pending(connection: HostConnection) -> None:

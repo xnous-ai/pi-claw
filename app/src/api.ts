@@ -1,7 +1,7 @@
 export type User = {
   id: string;
   name: string;
-  email: string;
+  phone: string;
 };
 
 export type Device = {
@@ -57,6 +57,20 @@ export type AgentConfiguration = {
   model: string;
   providers: AgentProviderOption[];
   models: AgentModelOption[];
+};
+
+export type DeviceCapability = {
+  id: string;
+  name: string;
+  kind: 'skill' | 'extension';
+  description: string;
+  version: string;
+  source: string;
+  permissions: string[];
+  enabled: boolean;
+  artifactAvailable: boolean;
+  installed: boolean;
+  installedVersion: string;
 };
 
 export type WifiNetwork = {
@@ -138,12 +152,17 @@ async function requestUrl<T>(
   }
 }
 
-async function request<T>(path: string, init: RequestInit, token?: string): Promise<T> {
-  return requestUrl<T>(`${API_URL}${path}`, init, token);
+async function request<T>(
+  path: string,
+  init: RequestInit,
+  token?: string,
+  timeout?: number,
+): Promise<T> {
+  return requestUrl<T>(`${API_URL}${path}`, init, token, timeout);
 }
 
 function normalizeSession(value: SessionPayload): AuthSession {
-  if (!value?.token || !value.user?.id || !value.user.email) {
+  if (!value?.token || !value.user?.id || typeof value.user.phone !== 'string') {
     throw new Error('登录服务返回了无效数据');
   }
   return {
@@ -153,34 +172,34 @@ function normalizeSession(value: SessionPayload): AuthSession {
   };
 }
 
-export async function login(email: string, password: string): Promise<AuthSession> {
+export async function login(phone: string, password: string): Promise<AuthSession> {
   if (isDemoMode) {
     await delay(450);
     return {
       token: 'demo-token',
-      user: { id: 'demo-user', name: '主机用户', email },
+      user: { id: 'demo-user', name: '主机用户', phone },
       devices: [],
     };
   }
   const session = await request<SessionPayload>('/v1/auth/login', {
     method: 'POST',
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ phone, password }),
   });
   return normalizeSession(session);
 }
 
-export async function register(name: string, email: string, password: string): Promise<AuthSession> {
+export async function register(name: string, phone: string, password: string): Promise<AuthSession> {
   if (isDemoMode) {
     await delay(500);
     return {
       token: 'demo-token',
-      user: { id: 'demo-user', name, email },
+      user: { id: 'demo-user', name, phone },
       devices: [],
     };
   }
   const session = await request<SessionPayload>('/v1/auth/register', {
     method: 'POST',
-    body: JSON.stringify({ name, email, password }),
+    body: JSON.stringify({ name, phone, password }),
   });
   return normalizeSession(session);
 }
@@ -405,6 +424,70 @@ export async function getDevice(token: string, deviceId: string): Promise<Device
     };
   }
   return request<Device>(`/v1/devices/${encodeURIComponent(deviceId)}`, { method: 'GET' }, token);
+}
+
+export async function getDeviceCapabilities(
+  token: string,
+  deviceId: string,
+): Promise<DeviceCapability[]> {
+  if (isDemoMode) {
+    await delay(350);
+    return [
+      {
+        id: 'web-search',
+        name: '网页搜索',
+        kind: 'skill',
+        description: '让 Agent 能够检索并整理公开网页信息。',
+        version: '1.0.0',
+        source: '',
+        permissions: ['网络访问'],
+        enabled: true,
+        artifactAvailable: true,
+        installed: false,
+        installedVersion: '',
+      },
+    ];
+  }
+  return request<DeviceCapability[]>(
+    `/v1/devices/${encodeURIComponent(deviceId)}/capabilities`,
+    { method: 'GET' },
+    token,
+    30_000,
+  );
+}
+
+export async function installDeviceCapability(
+  token: string,
+  deviceId: string,
+  capabilityId: string,
+): Promise<void> {
+  if (isDemoMode) {
+    await delay(800);
+    return;
+  }
+  await request(
+    `/v1/devices/${encodeURIComponent(deviceId)}/capabilities/${encodeURIComponent(capabilityId)}`,
+    { method: 'POST' },
+    token,
+    130_000,
+  );
+}
+
+export async function removeDeviceCapability(
+  token: string,
+  deviceId: string,
+  capabilityId: string,
+): Promise<void> {
+  if (isDemoMode) {
+    await delay(500);
+    return;
+  }
+  await request(
+    `/v1/devices/${encodeURIComponent(deviceId)}/capabilities/${encodeURIComponent(capabilityId)}`,
+    { method: 'DELETE' },
+    token,
+    130_000,
+  );
 }
 
 export async function releaseDevice(token: string, deviceId: string) {
