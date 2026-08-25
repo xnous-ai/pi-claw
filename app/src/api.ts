@@ -11,6 +11,8 @@ export type Device = {
   status: 'online' | 'offline';
   version: string;
   lastSeenAt: string;
+  agentProvider?: AgentProvider;
+  agentModel?: string;
 };
 
 export type AuthSession = {
@@ -35,6 +37,12 @@ export type Conversation = {
 };
 
 export type AgentProvider = 'openai' | 'anthropic' | 'google' | 'openrouter';
+
+export type AgentConfiguration = {
+  configured: boolean;
+  provider: AgentProvider | '';
+  model: string;
+};
 
 export type WifiNetwork = {
   ssid: string;
@@ -340,6 +348,21 @@ export async function configureDeviceAgent(
         model: model.trim() || undefined,
       }),
     },
+    token,
+  );
+}
+
+export async function getDeviceAgentConfig(
+  token: string,
+  deviceId: string,
+): Promise<AgentConfiguration> {
+  if (isDemoMode) {
+    await delay(300);
+    return { configured: false, provider: '', model: '' };
+  }
+  return request<AgentConfiguration>(
+    `/v1/devices/${encodeURIComponent(deviceId)}/agent-config`,
+    { method: 'GET' },
     token,
   );
 }

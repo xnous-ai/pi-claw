@@ -20,6 +20,7 @@ import {
   configureDeviceAgent,
   configureDeviceNetwork,
   getDevice,
+  getDeviceAgentConfig,
   isDemoMode,
   login,
   prepareDeviceProvisioning,
@@ -29,6 +30,7 @@ import {
   scanHostWifiNetworks,
   sendAgentMessage,
   type AgentProvider,
+  type AgentConfiguration,
   type AgentMessage,
   type AuthSession,
   type Conversation,
@@ -50,8 +52,16 @@ type Route =
   | { name: 'root' }
   | { name: 'chat'; conversationId: string }
   | { name: 'device'; deviceId: string }
+  | { name: 'agent-config'; deviceId: string }
   | { name: 'add-device' }
   | { name: 'profile-detail'; page: ProfilePage };
+
+const agentProviders: { id: AgentProvider; label: string }[] = [
+  { id: 'openai', label: 'OpenAI' },
+  { id: 'anthropic', label: 'Anthropic' },
+  { id: 'google', label: 'Gemini' },
+  { id: 'openrouter', label: 'OpenRouter' },
+];
 
 const colors = {
   ink: '#101828',
@@ -235,6 +245,34 @@ function Field({
   );
 }
 
+function ProviderPicker({
+  provider,
+  onChange,
+}: {
+  provider: AgentProvider;
+  onChange: (provider: AgentProvider) => void;
+}) {
+  return (
+    <View accessibilityRole="radiogroup" style={styles.providerGroup}>
+      {agentProviders.map((item) => {
+        const selected = provider === item.id;
+        return (
+          <Pressable
+            accessibilityRole="radio"
+            accessibilityState={{ checked: selected }}
+            key={item.id}
+            onPress={() => onChange(item.id)}
+            style={({ pressed }) => [styles.providerOption, selected && styles.providerOptionSelected, pressed && styles.pressed]}
+          >
+            <View style={[styles.providerRadio, selected && styles.providerRadioSelected]} />
+            <Text style={[styles.providerLabel, selected && styles.providerLabelSelected]}>{item.label}</Text>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+}
+
 function ModeBadge() {
   return (
     <View style={isDemoMode ? styles.demoBadge : styles.liveBadge}>
@@ -371,13 +409,6 @@ function AddDeviceScreen({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  const providers: { id: AgentProvider; label: string }[] = [
-    { id: 'openai', label: 'OpenAI' },
-    { id: 'anthropic', label: 'Anthropic' },
-    { id: 'google', label: 'Gemini' },
-    { id: 'openrouter', label: 'OpenRouter' },
-  ];
-
   async function prepareAndOpenWifiSettings() {
     if (!hostName.trim()) return setError('请输入主机名称');
     setError('');
@@ -470,7 +501,11 @@ function AddDeviceScreen({
         model,
       );
       setApiKey('');
-      await onAdded(pendingDevice);
+      await onAdded({
+        ...pendingDevice,
+        agentProvider: provider,
+        agentModel: model.trim() || undefined,
+      });
     } catch (requestError) {
       setError(errorMessage(requestError));
     } finally {
@@ -588,23 +623,7 @@ function AddDeviceScreen({
             <>
               <Text style={styles.setupTitle}>设置模型服务</Text>
               <Text style={styles.setupDescription}>主机已联网。选择服务商并填写 API Key，模型名称可留空并使用 Pi agent 默认值。</Text>
-              <View accessibilityRole="radiogroup" style={styles.providerGroup}>
-                {providers.map((item) => {
-                  const selected = provider === item.id;
-                  return (
-                    <Pressable
-                      accessibilityRole="radio"
-                      accessibilityState={{ checked: selected }}
-                      key={item.id}
-                      onPress={() => setProvider(item.id)}
-                      style={({ pressed }) => [styles.providerOption, selected && styles.providerOptionSelected, pressed && styles.pressed]}
-                    >
-                      <View style={[styles.providerRadio, selected && styles.providerRadioSelected]} />
-                      <Text style={[styles.providerLabel, selected && styles.providerLabelSelected]}>{item.label}</Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
+              <ProviderPicker onChange={setProvider} provider={provider} />
               <View style={styles.formBlockCompact}>
                 <Field label="API Key" onChangeText={setApiKey} placeholder="输入服务商 API Key" secureTextEntry value={apiKey} />
                 <Field label="模型（选填）" onChangeText={setModel} placeholder="例如 gpt-5-mini" value={model} />
@@ -886,15 +905,18 @@ function DeviceDetailScreen({
   device,
   refreshing,
   onBack,
+  onConfigure,
   onRefresh,
   onRelease,
 }: {
   device: Device;
   refreshing: boolean;
   onBack: () => void;
+  onConfigure: () => void;
   onRefresh: () => void;
   onRelease: () => void;
 }) {
+  const providerLabel = agentProviders.find((item) => item.id === device.agentProvider)?.label;
   return (
     <View style={styles.fullPage}>
       <PageHeader
@@ -921,11 +943,115 @@ function DeviceDetailScreen({
           <DetailRow label="系统版本" value={device.version} />
           <DetailRow label="最近在线" value={formatLastSeen(device.lastSeenAt)} />
         </View>
+        <Text style={styles.listSectionTitle}>Agent</Text>
+        <View style={styles.listSurface}>
+          <SettingsRow
+            icon="key"
+            label="模型服务"
+            onPress={onConfigure}
+            value={providerLabel ?? '设置'}
+          />
+        </View>
         <Pressable accessibilityRole="button" onPress={onRelease} style={({ pressed }) => [styles.dangerAction, pressed && styles.pressed]}>
           <Icon color={colors.danger} name="delete" size={21} />
           <Text style={styles.dangerActionText}>解绑这台主机</Text>
         </Pressable>
       </ScrollView>
+    </View>
+  );
+}
+
+function AgentConfigScreen({
+  device,
+  onBack,
+  onLoad,
+  onSave,
+}: {
+  device: Device;
+  onBack: () => void;
+  onLoad: () => Promise<AgentConfiguration>;
+  onSave: (provider: AgentProvider, apiKey: string | undefined, model: string) => Promise<void>;
+}) {
+  const [provider, setProvider] = useState<AgentProvider>(device.agentProvider ?? 'openai');
+  const [configuredProvider, setConfiguredProvider] = useState<AgentProvider | null>(device.agentProvider ?? null);
+  const [apiKey, setApiKey] = useState('');
+  const [model, setModel] = useState(device.agentModel ?? '');
+  const [loadingConfig, setLoadingConfig] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [saved, setSaved] = useState(false);
+  const requiresApiKey = !configuredProvider || provider !== configuredProvider;
+
+  useEffect(() => {
+    let active = true;
+    onLoad()
+      .then((config) => {
+        if (!active || !config.configured || !config.provider) return;
+        setProvider(config.provider);
+        setConfiguredProvider(config.provider);
+        setModel(config.model);
+      })
+      .catch((loadError) => {
+        if (active) setError(errorMessage(loadError));
+      })
+      .finally(() => {
+        if (active) setLoadingConfig(false);
+      });
+    return () => { active = false; };
+  }, [device.id]);
+
+  async function submit() {
+    const nextKey = apiKey.trim();
+    if (requiresApiKey && nextKey.length < 8) return setError('切换服务商时请输入新的 API Key');
+    if (nextKey && nextKey.length < 8) return setError('请输入有效的 API Key');
+    setError('');
+    setSaved(false);
+    setLoading(true);
+    try {
+      await onSave(provider, nextKey || undefined, model.trim());
+      setApiKey('');
+      setConfiguredProvider(provider);
+      setSaved(true);
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <View style={styles.fullPage}>
+      <PageHeader onBack={onBack} subtitle={device.name} title="模型服务" />
+      <KeyboardAvoidingView behavior="height" style={styles.screen}>
+        <ScrollView contentContainerStyle={styles.pageContent} keyboardShouldPersistTaps="handled">
+          <Text style={styles.setupTitle}>选择服务商</Text>
+          <Text style={styles.setupDescription}>设置会实时发送到这台主机，并用于之后的新聊天请求。</Text>
+          {loadingConfig && (
+            <View style={styles.configLoading}>
+              <ActivityIndicator color={colors.accent} size="small" />
+              <Text style={styles.configLoadingText}>正在读取主机当前配置</Text>
+            </View>
+          )}
+          <ProviderPicker onChange={(value) => { setProvider(value); setSaved(false); setError(''); }} provider={provider} />
+          <View style={styles.formBlockCompact}>
+            <Field
+              label={requiresApiKey ? 'API Key' : '新 API Key（选填）'}
+              onChangeText={(value) => { setApiKey(value); setSaved(false); }}
+              placeholder={requiresApiKey ? '输入所选服务商的 API Key' : '留空则继续使用当前 Key'}
+              secureTextEntry
+              value={apiKey}
+            />
+            <Field label="模型（选填）" onChangeText={(value) => { setModel(value); setSaved(false); }} placeholder="留空使用 Pi agent 默认模型" value={model} />
+            <View style={styles.securityNote}>
+              <Icon color={colors.success} name="lock" size={20} />
+              <Text style={styles.securityNoteText}>Key 仅经服务端实时转发并保存在当前主机，不会写入云端数据库。</Text>
+            </View>
+            {!!saved && <Text style={styles.successText}>设置已保存并下发到主机。</Text>}
+            {!!error && <Text style={styles.errorText}>{error}</Text>}
+            <PrimaryButton icon="save" label="保存设置" loading={loading} onPress={submit} />
+          </View>
+        </ScrollView>
+      </KeyboardAvoidingView>
     </View>
   );
 }
@@ -1088,6 +1214,8 @@ function MainScreen({
   sending,
   onAddDevice,
   onCreateConversation,
+  onConfigureDevice,
+  onLoadDeviceConfig,
   onRefreshDevice,
   onReleaseDevice,
   onSend,
@@ -1098,6 +1226,8 @@ function MainScreen({
   sending: boolean;
   onAddDevice: (device: Device) => Promise<void>;
   onCreateConversation: (deviceId: string) => Promise<Conversation>;
+  onConfigureDevice: (deviceId: string, provider: AgentProvider, apiKey: string | undefined, model: string) => Promise<void>;
+  onLoadDeviceConfig: (deviceId: string) => Promise<AgentConfiguration>;
   onRefreshDevice: (deviceId: string) => Promise<void>;
   onReleaseDevice: (deviceId: string) => Promise<void>;
   onSend: (conversationId: string, text: string) => Promise<void>;
@@ -1165,6 +1295,7 @@ function MainScreen({
       <DeviceDetailScreen
         device={device}
         onBack={() => setRoute({ name: 'root' })}
+        onConfigure={() => setRoute({ name: 'agent-config', deviceId: device.id })}
         onRefresh={async () => {
           setRefreshing(true);
           try {
@@ -1177,6 +1308,16 @@ function MainScreen({
         }}
         onRelease={() => confirmRelease(device)}
         refreshing={refreshing}
+      />
+    ) : null;
+  } else if (route.name === 'agent-config') {
+    const device = session.devices.find((item) => item.id === route.deviceId);
+    content = device ? (
+      <AgentConfigScreen
+        device={device}
+        onBack={() => setRoute({ name: 'device', deviceId: device.id })}
+        onLoad={() => onLoadDeviceConfig(device.id)}
+        onSave={(provider, apiKey, model) => onConfigureDevice(device.id, provider, apiKey, model)}
       />
     ) : null;
   } else if (route.name === 'add-device') {
@@ -1276,6 +1417,40 @@ function AppContent() {
     });
   }
 
+  async function configureAgent(
+    deviceId: string,
+    provider: AgentProvider,
+    apiKey: string | undefined,
+    model: string,
+  ) {
+    if (!session) return;
+    await configureDeviceAgent(session.token, deviceId, provider, apiKey, model);
+    await updateSession({
+      ...session,
+      devices: session.devices.map((device) => device.id === deviceId ? {
+        ...device,
+        agentProvider: provider,
+        agentModel: model || undefined,
+      } : device),
+    });
+  }
+
+  async function loadAgentConfig(deviceId: string) {
+    if (!session) return { configured: false, provider: '', model: '' } as AgentConfiguration;
+    const config = await getDeviceAgentConfig(session.token, deviceId);
+    if (config.configured && config.provider) {
+      await updateSession({
+        ...session,
+        devices: session.devices.map((device) => device.id === deviceId ? {
+          ...device,
+          agentProvider: config.provider || undefined,
+          agentModel: config.model || undefined,
+        } : device),
+      });
+    }
+    return config;
+  }
+
   async function unbindDevice(deviceId: string) {
     if (!session) return;
     await releaseDevice(session.token, deviceId);
@@ -1356,7 +1531,9 @@ function AppContent() {
     <MainScreen
       conversations={conversations}
       onAddDevice={addDevice}
+      onConfigureDevice={configureAgent}
       onCreateConversation={createConversation}
+      onLoadDeviceConfig={loadAgentConfig}
       onRefreshDevice={refreshDevice}
       onReleaseDevice={unbindDevice}
       onSend={sendMessage}
@@ -1389,6 +1566,9 @@ const styles = StyleSheet.create({
   fieldLabel: { color: colors.ink, fontSize: 14, fontWeight: '700', marginBottom: 8 },
   fieldInput: { backgroundColor: colors.surface, borderColor: colors.line, borderRadius: 8, borderWidth: 1, color: colors.ink, fontSize: 16, height: 54, paddingHorizontal: 16 },
   errorText: { color: colors.danger, fontSize: 13, lineHeight: 19, marginBottom: 14 },
+  successText: { color: colors.success, fontSize: 13, lineHeight: 19, marginBottom: 14 },
+  configLoading: { alignItems: 'center', flexDirection: 'row', minHeight: 42, paddingTop: 12 },
+  configLoadingText: { color: colors.muted, fontSize: 13, marginLeft: 10 },
   primaryButton: { alignItems: 'center', backgroundColor: colors.accent, borderRadius: 8, height: 52, justifyContent: 'center', marginTop: 4, paddingHorizontal: 18 },
   primaryButtonText: { color: colors.surface, fontSize: 16, fontWeight: '700' },
   buttonContent: { alignItems: 'center', flexDirection: 'row', justifyContent: 'center' },

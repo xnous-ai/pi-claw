@@ -685,6 +685,37 @@ async def handle_agent_configuration(
         )
 
 
+async def handle_agent_config_query(websocket, message: dict, config_path: Path) -> None:
+    request_id = str(message.get("requestId", ""))
+    try:
+        if not request_id:
+            raise ValueError("配置请求无效")
+        config = load_agent_config(config_path)
+        await websocket.send(
+            json.dumps(
+                {
+                    "type": "agent.config",
+                    "requestId": request_id,
+                    "configured": config is not None,
+                    "provider": config["provider"] if config else "",
+                    "model": config["model"] if config else "",
+                },
+                ensure_ascii=False,
+            )
+        )
+    except Exception as error:
+        await websocket.send(
+            json.dumps(
+                {
+                    "type": "agent.config.error",
+                    "requestId": request_id,
+                    "message": str(error)[:300] or "读取 Agent 配置失败",
+                },
+                ensure_ascii=False,
+            )
+        )
+
+
 async def run_host(
     server: str,
     credentials: dict,
@@ -710,6 +741,10 @@ async def run_host(
                         elif message.get("type") == "agent.configure":
                             await handle_agent_configuration(
                                 websocket, message, agent, agent_config_path
+                            )
+                        elif message.get("type") == "agent.config.get":
+                            await handle_agent_config_query(
+                                websocket, message, agent_config_path
                             )
                 finally:
                     heartbeat_task.cancel()

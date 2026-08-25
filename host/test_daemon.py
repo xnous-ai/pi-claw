@@ -18,6 +18,7 @@ from daemon import (
     connect_wifi,
     has_network_connection,
     handle_agent_configuration,
+    handle_agent_config_query,
     handle_chat,
     load_agent_config,
     message_text,
@@ -391,6 +392,40 @@ class ProvisioningTest(unittest.TestCase):
             self.assertEqual(websocket.messages[0]["type"], "agent.configured")
             self.assertEqual(agent.provider, "openai")
             self.assertEqual(agent.model, "gpt-next")
+
+    def test_returns_agent_config_without_api_key(self) -> None:
+        class FakeWebsocket:
+            def __init__(self) -> None:
+                self.messages: list[dict] = []
+
+            async def send(self, value: str) -> None:
+                self.messages.append(json.loads(value))
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "agent.json"
+            save_agent_config(
+                path,
+                {"provider": "google", "apiKey": "private-key", "model": "gemini-test"},
+            )
+            websocket = FakeWebsocket()
+            asyncio.run(
+                handle_agent_config_query(
+                    websocket,
+                    {"requestId": "config-read-1"},
+                    path,
+                )
+            )
+            self.assertEqual(
+                websocket.messages,
+                [{
+                    "type": "agent.config",
+                    "requestId": "config-read-1",
+                    "configured": True,
+                    "provider": "google",
+                    "model": "gemini-test",
+                }],
+            )
+            self.assertNotIn("apiKey", websocket.messages[0])
 
 
 if __name__ == "__main__":

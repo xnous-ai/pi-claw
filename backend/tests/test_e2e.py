@@ -177,6 +177,19 @@ class BackendFlowTest(unittest.TestCase):
                         }
                     )
                 )
+                read_request = json.loads(await websocket.recv())
+                self.assertEqual(read_request["type"], "agent.config.get")
+                await websocket.send(
+                    json.dumps(
+                        {
+                            "type": "agent.config",
+                            "requestId": read_request["requestId"],
+                            "configured": True,
+                            "provider": "openai",
+                            "model": "gpt-next",
+                        }
+                    )
+                )
                 request = json.loads(await websocket.recv())
                 self.assertEqual(request["type"], "chat.request")
                 await websocket.send(
@@ -224,6 +237,16 @@ class BackendFlowTest(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(configured, {"provider": "openai", "model": "gpt-next"})
+
+        status, config = http_json(
+            f"{self.base}/v1/devices/{device['id']}/agent-config",
+            token=token,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            config,
+            {"configured": True, "provider": "openai", "model": "gpt-next"},
+        )
 
         status, reply = http_json(
             f"{self.base}/v1/devices/{device['id']}/messages",

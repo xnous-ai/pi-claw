@@ -341,6 +341,25 @@ async def configure_agent(
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(error))
 
 
+@app.get("/v1/devices/{device_id}/agent-config")
+async def get_agent_config(
+    device_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    device = owned_device(device_id, user, db)
+    if not relay.is_online(device.id):
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "主机当前离线")
+    try:
+        return await relay.get_agent_config(device.id)
+    except HostOffline:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "主机连接已断开")
+    except TimeoutError:
+        raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, "读取主机配置超时")
+    except RuntimeError as error:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(error))
+
+
 @app.websocket("/v1/hosts/{device_id}/ws")
 async def host_websocket(websocket: WebSocket, device_id: str) -> None:
     authorization = websocket.headers.get("authorization", "")

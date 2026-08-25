@@ -118,6 +118,25 @@ class Relay:
         finally:
             connection.pending.pop(request_id, None)
 
+    async def get_agent_config(self, device_id: str) -> dict:
+        connection = self._hosts.get(device_id)
+        if not connection:
+            raise HostOffline
+        request_id = str(uuid4())
+        pending = PendingRequest(asyncio.get_running_loop().create_future(), kind="agent-config-read")
+        connection.pending[request_id] = pending
+        try:
+            try:
+                async with connection.send_lock:
+                    await connection.websocket.send_json(
+                        {"type": "agent.config.get", "requestId": request_id}
+                    )
+            except (OSError, RuntimeError) as error:
+                raise HostOffline from error
+            return await asyncio.wait_for(pending.future, timeout=30)
+        finally:
+            connection.pending.pop(request_id, None)
+
     async def handle(self, connection: HostConnection, payload: dict) -> None:
         request_id = payload.get("requestId")
         pending = connection.pending.get(request_id)
@@ -156,8 +175,20 @@ class Relay:
                 }
             )
         elif (
+            payload.get("type") == "agent.config"
+            and pending.kind == "agent-config-read"
+            and not pending.future.done()
+        ):
+            pending.future.set_result(
+                {
+                    "configured": bool(payload.get("configured")),
+                    "provider": str(payload.get("provider", "")),
+                    "model": str(payload.get("model", "")),
+                }
+            )
+        elif (
             payload.get("type") == "agent.config.error"
-            and pending.kind == "agent-config"
+            and pending.kind in ("agent-config", "agent-config-read")
             and not pending.future.done()
         ):
             pending.future.set_exception(RuntimeError(str(payload.get("message") or "Agent 配置失败")))
