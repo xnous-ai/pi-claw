@@ -36,12 +36,26 @@ export type Conversation = {
   messages: AgentMessage[];
 };
 
-export type AgentProvider = 'openai' | 'anthropic' | 'google' | 'openrouter';
+export type AgentProvider = string;
+
+export type AgentProviderOption = {
+  id: AgentProvider;
+  label: string;
+};
+
+export type AgentModelOption = {
+  id: string;
+  name: string;
+  reasoning: boolean;
+  contextWindow: number;
+};
 
 export type AgentConfiguration = {
   configured: boolean;
   provider: AgentProvider | '';
   model: string;
+  providers: AgentProviderOption[];
+  models: AgentModelOption[];
 };
 
 export type WifiNetwork = {
@@ -358,7 +372,17 @@ export async function getDeviceAgentConfig(
 ): Promise<AgentConfiguration> {
   if (isDemoMode) {
     await delay(300);
-    return { configured: false, provider: '', model: '' };
+    return {
+      configured: false,
+      provider: '',
+      model: '',
+      providers: [
+        { id: 'openai', label: 'OpenAI' },
+        { id: 'anthropic', label: 'Anthropic' },
+        { id: 'google', label: 'Google Gemini' },
+      ],
+      models: [],
+    };
   }
   return request<AgentConfiguration>(
     `/v1/devices/${encodeURIComponent(deviceId)}/agent-config`,

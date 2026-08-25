@@ -184,6 +184,21 @@ class Relay:
                     "configured": bool(payload.get("configured")),
                     "provider": str(payload.get("provider", "")),
                     "model": str(payload.get("model", "")),
+                    "providers": [
+                        {"id": str(item.get("id", "")), "label": str(item.get("label", ""))}
+                        for item in payload.get("providers", [])
+                        if isinstance(item, dict) and item.get("id") and item.get("label")
+                    ],
+                    "models": [
+                        {
+                            "id": str(item.get("id", "")),
+                            "name": str(item.get("name", "")),
+                            "reasoning": bool(item.get("reasoning")),
+                            "contextWindow": int(item.get("contextWindow") or 0),
+                        }
+                        for item in payload.get("models", [])
+                        if isinstance(item, dict) and item.get("id")
+                    ],
                 }
             )
         elif (

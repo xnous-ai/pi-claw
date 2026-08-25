@@ -20,12 +20,41 @@ if os.name != "nt":
     import pwd
 
 
-PROVIDER_API_KEY_ENV = {
-    "anthropic": "ANTHROPIC_API_KEY",
-    "google": "GEMINI_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "openrouter": "OPENROUTER_API_KEY",
-}
+PROVIDER_CATALOG = [
+    ("anthropic", "Anthropic", "ANTHROPIC_API_KEY"),
+    ("ant-ling", "Ant Ling", "ANT_LING_API_KEY"),
+    ("openai", "OpenAI", "OPENAI_API_KEY"),
+    ("deepseek", "DeepSeek", "DEEPSEEK_API_KEY"),
+    ("nvidia", "NVIDIA NIM", "NVIDIA_API_KEY"),
+    ("google", "Google Gemini", "GEMINI_API_KEY"),
+    ("amazon-bedrock", "Amazon Bedrock", "AWS_BEARER_TOKEN_BEDROCK"),
+    ("mistral", "Mistral", "MISTRAL_API_KEY"),
+    ("groq", "Groq", "GROQ_API_KEY"),
+    ("cerebras", "Cerebras", "CEREBRAS_API_KEY"),
+    ("xai", "xAI", "XAI_API_KEY"),
+    ("openrouter", "OpenRouter", "OPENROUTER_API_KEY"),
+    ("vercel-ai-gateway", "Vercel AI Gateway", "AI_GATEWAY_API_KEY"),
+    ("zai", "ZAI", "ZAI_API_KEY"),
+    ("zai-coding-cn", "ZAI 中国", "ZAI_CODING_CN_API_KEY"),
+    ("opencode", "OpenCode Zen", "OPENCODE_API_KEY"),
+    ("opencode-go", "OpenCode Go", "OPENCODE_API_KEY"),
+    ("radius", "Radius", "RADIUS_API_KEY"),
+    ("huggingface", "Hugging Face", "HF_TOKEN"),
+    ("fireworks", "Fireworks", "FIREWORKS_API_KEY"),
+    ("together", "Together AI", "TOGETHER_API_KEY"),
+    ("baseten", "Baseten", "BASETEN_API_KEY"),
+    ("kimi-coding", "Kimi For Coding", "KIMI_API_KEY"),
+    ("minimax", "MiniMax", "MINIMAX_API_KEY"),
+    ("minimax-cn", "MiniMax 中国", "MINIMAX_CN_API_KEY"),
+    ("qwen-token-plan", "Qwen Token Plan", "QWEN_TOKEN_PLAN_API_KEY"),
+    ("qwen-token-plan-individual", "Qwen Individual", "QWEN_TOKEN_PLAN_API_KEY"),
+    ("qwen-token-plan-cn", "Qwen 中国", "QWEN_TOKEN_PLAN_CN_API_KEY"),
+    ("xiaomi", "Xiaomi MiMo", "XIAOMI_API_KEY"),
+    ("xiaomi-token-plan-cn", "Xiaomi Token Plan 中国", "XIAOMI_TOKEN_PLAN_CN_API_KEY"),
+    ("xiaomi-token-plan-ams", "Xiaomi Token Plan Amsterdam", "XIAOMI_TOKEN_PLAN_AMS_API_KEY"),
+    ("xiaomi-token-plan-sgp", "Xiaomi Token Plan Singapore", "XIAOMI_TOKEN_PLAN_SGP_API_KEY"),
+]
+PROVIDER_API_KEY_ENV = {provider: env for provider, _, env in PROVIDER_CATALOG}
 
 
 def machine_serial() -> str:
@@ -514,6 +543,57 @@ class PiRpcAgent:
                 arguments.extend((flag, value))
         return arguments
 
+    async def available_models(self, provider: str) -> list[dict]:
+        process = await asyncio.create_subprocess_exec(
+            self.command,
+            "--mode",
+            "rpc",
+            "--no-session",
+            "--provider",
+            provider,
+            "--approve",
+            "--no-tools",
+            cwd=self.workspace,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            limit=1024 * 1024,
+        )
+        assert process.stdin and process.stdout and process.stderr
+        try:
+            command = {"id": "clawpi-models", "type": "get_available_models"}
+            process.stdin.write((json.dumps(command) + "\n").encode())
+            await process.stdin.drain()
+            while line := await process.stdout.readline():
+                event = json.loads(line)
+                if event.get("type") != "response" or event.get("command") != "get_available_models":
+                    continue
+                if not event.get("success", False):
+                    raise RuntimeError(str(event.get("error") or "Pi 模型目录读取失败"))
+                models = event.get("data", {}).get("models", [])
+                return [
+                    {
+                        "id": str(model.get("id", "")),
+                        "name": str(model.get("name") or model.get("id") or ""),
+                        "reasoning": bool(model.get("reasoning")),
+                        "contextWindow": int(model.get("contextWindow") or 0),
+                    }
+                    for model in models
+                    if isinstance(model, dict)
+                    and model.get("provider") == provider
+                    and model.get("id")
+                ]
+            detail = (await process.stderr.read()).decode(errors="replace").strip()
+            raise RuntimeError(detail or "Pi 模型目录读取失败")
+        finally:
+            if process.returncode is None:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), 3)
+                except TimeoutError:
+                    process.kill()
+                    await process.wait()
+
     async def stream(self, conversation_id: str, text: str):
         process = await asyncio.create_subprocess_exec(
             *self.arguments(conversation_id),
@@ -685,12 +765,15 @@ async def handle_agent_configuration(
         )
 
 
-async def handle_agent_config_query(websocket, message: dict, config_path: Path) -> None:
+async def handle_agent_config_query(
+    websocket, message: dict, agent: PiRpcAgent, config_path: Path
+) -> None:
     request_id = str(message.get("requestId", ""))
     try:
         if not request_id:
             raise ValueError("配置请求无效")
         config = load_agent_config(config_path)
+        models = await agent.available_models(config["provider"]) if config else []
         await websocket.send(
             json.dumps(
                 {
@@ -699,6 +782,11 @@ async def handle_agent_config_query(websocket, message: dict, config_path: Path)
                     "configured": config is not None,
                     "provider": config["provider"] if config else "",
                     "model": config["model"] if config else "",
+                    "providers": [
+                        {"id": provider, "label": label}
+                        for provider, label, _ in PROVIDER_CATALOG
+                    ],
+                    "models": models,
                 },
                 ensure_ascii=False,
             )
@@ -744,7 +832,7 @@ async def run_host(
                             )
                         elif message.get("type") == "agent.config.get":
                             await handle_agent_config_query(
-                                websocket, message, agent_config_path
+                                websocket, message, agent, agent_config_path
                             )
                 finally:
                     heartbeat_task.cancel()

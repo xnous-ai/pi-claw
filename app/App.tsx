@@ -31,6 +31,8 @@ import {
   sendAgentMessage,
   type AgentProvider,
   type AgentConfiguration,
+  type AgentModelOption,
+  type AgentProviderOption,
   type AgentMessage,
   type AuthSession,
   type Conversation,
@@ -55,13 +57,6 @@ type Route =
   | { name: 'agent-config'; deviceId: string }
   | { name: 'add-device' }
   | { name: 'profile-detail'; page: ProfilePage };
-
-const agentProviders: { id: AgentProvider; label: string }[] = [
-  { id: 'openai', label: 'OpenAI' },
-  { id: 'anthropic', label: 'Anthropic' },
-  { id: 'google', label: 'Gemini' },
-  { id: 'openrouter', label: 'OpenRouter' },
-];
 
 const colors = {
   ink: '#101828',
@@ -247,28 +242,129 @@ function Field({
 
 function ProviderPicker({
   provider,
+  providers,
   onChange,
 }: {
   provider: AgentProvider;
+  providers: AgentProviderOption[];
   onChange: (provider: AgentProvider) => void;
 }) {
+  const [expanded, setExpanded] = useState(false);
+  const [query, setQuery] = useState('');
+  const selected = providers.find((item) => item.id === provider);
+  const normalizedQuery = query.trim().toLowerCase();
+  const visible = normalizedQuery
+    ? providers.filter((item) => `${item.label} ${item.id}`.toLowerCase().includes(normalizedQuery))
+    : providers;
+
   return (
-    <View accessibilityRole="radiogroup" style={styles.providerGroup}>
-      {agentProviders.map((item) => {
-        const selected = provider === item.id;
-        return (
-          <Pressable
-            accessibilityRole="radio"
-            accessibilityState={{ checked: selected }}
-            key={item.id}
-            onPress={() => onChange(item.id)}
-            style={({ pressed }) => [styles.providerOption, selected && styles.providerOptionSelected, pressed && styles.pressed]}
-          >
-            <View style={[styles.providerRadio, selected && styles.providerRadioSelected]} />
-            <Text style={[styles.providerLabel, selected && styles.providerLabelSelected]}>{item.label}</Text>
-          </Pressable>
-        );
-      })}
+    <View style={styles.providerPicker}>
+      <Text style={styles.fieldLabel}>服务商</Text>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ expanded }}
+        disabled={!providers.length}
+        onPress={() => setExpanded((current) => !current)}
+        style={({ pressed }) => [styles.selectControl, !providers.length && styles.buttonDisabled, pressed && styles.rowPressed]}
+      >
+        <Text numberOfLines={1} style={selected ? styles.selectValue : styles.selectPlaceholder}>
+          {selected?.label ?? (providers.length ? '选择服务商' : '正在读取服务商')}
+        </Text>
+        <Icon color={colors.subtle} name={expanded ? 'expand_less' : 'expand_more'} size={22} />
+      </Pressable>
+      {expanded && (
+        <View accessibilityRole="radiogroup" style={styles.selectMenu}>
+          <TextInput
+            autoCapitalize="none"
+            autoCorrect={false}
+            onChangeText={setQuery}
+            placeholder="搜索服务商"
+            placeholderTextColor={colors.subtle}
+            style={styles.selectSearch}
+            value={query}
+          />
+          {visible.map((item, index) => {
+            const checked = provider === item.id;
+            return (
+              <Pressable
+                accessibilityRole="radio"
+                accessibilityState={{ checked }}
+                key={item.id}
+                onPress={() => { onChange(item.id); setExpanded(false); setQuery(''); }}
+                style={({ pressed }) => [
+                  styles.selectRow,
+                  index < visible.length - 1 && styles.rowDivider,
+                  checked && styles.selectRowSelected,
+                  pressed && styles.rowPressed,
+                ]}
+              >
+                <View style={[styles.providerRadio, checked && styles.providerRadioSelected]} />
+                <View style={styles.selectRowCopy}>
+                  <Text style={[styles.providerLabel, checked && styles.providerLabelSelected]}>{item.label}</Text>
+                  <Text style={styles.providerId}>{item.id}</Text>
+                </View>
+              </Pressable>
+            );
+          })}
+          {!visible.length && <Text style={styles.selectEmpty}>没有匹配的服务商</Text>}
+        </View>
+      )}
+    </View>
+  );
+}
+
+function ModelPicker({
+  model,
+  models,
+  onChange,
+}: {
+  model: string;
+  models: AgentModelOption[];
+  onChange: (model: string) => void;
+}) {
+  const options = model && !models.some((item) => item.id === model)
+    ? [{ id: model, name: model, reasoning: false, contextWindow: 0 }, ...models]
+    : models;
+  return (
+    <View style={styles.modelPicker}>
+      <Text style={styles.fieldLabel}>模型</Text>
+      <View accessibilityRole="radiogroup" style={styles.modelList}>
+        <Pressable
+          accessibilityRole="radio"
+          accessibilityState={{ checked: !model }}
+          onPress={() => onChange('')}
+          style={({ pressed }) => [styles.modelRow, styles.rowDivider, !model && styles.selectRowSelected, pressed && styles.rowPressed]}
+        >
+          <View style={[styles.providerRadio, !model && styles.providerRadioSelected]} />
+          <View style={styles.selectRowCopy}>
+            <Text style={[styles.providerLabel, !model && styles.providerLabelSelected]}>Pi 默认模型</Text>
+            <Text style={styles.providerId}>自动选择</Text>
+          </View>
+        </Pressable>
+        {options.map((item, index) => {
+          const checked = model === item.id;
+          return (
+            <Pressable
+              accessibilityRole="radio"
+              accessibilityState={{ checked }}
+              key={item.id}
+              onPress={() => onChange(item.id)}
+              style={({ pressed }) => [
+                styles.modelRow,
+                index < options.length - 1 && styles.rowDivider,
+                checked && styles.selectRowSelected,
+                pressed && styles.rowPressed,
+              ]}
+            >
+              <View style={[styles.providerRadio, checked && styles.providerRadioSelected]} />
+              <View style={styles.selectRowCopy}>
+                <Text numberOfLines={2} style={[styles.providerLabel, checked && styles.providerLabelSelected]}>{item.name}</Text>
+                <Text style={styles.providerId}>{item.id}{item.reasoning ? ' · 推理模型' : ''}</Text>
+              </View>
+            </Pressable>
+          );
+        })}
+      </View>
     </View>
   );
 }
@@ -401,7 +497,8 @@ function AddDeviceScreen({
   const [scanningWifi, setScanningWifi] = useState(false);
   const [wifiScanError, setWifiScanError] = useState('');
   const [manualWifi, setManualWifi] = useState(false);
-  const [provider, setProvider] = useState<AgentProvider>('openai');
+  const [provider, setProvider] = useState<AgentProvider>('');
+  const [providers, setProviders] = useState<AgentProviderOption[]>([]);
   const [model, setModel] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [pendingDevice, setPendingDevice] = useState<Device | null>(null);
@@ -478,7 +575,12 @@ function AddDeviceScreen({
         wifiName.trim(),
         wifiPassword,
       );
+      const config = await getDeviceAgentConfig(session.token, device.id);
+      if (!config.providers.length) throw new Error('主机没有返回可用服务商');
       setPendingDevice(device);
+      setProviders(config.providers);
+      setProvider(config.provider || config.providers[0].id);
+      setModel(config.model);
       setStep('agent');
     } catch (requestError) {
       setError(errorMessage(requestError));
@@ -489,6 +591,7 @@ function AddDeviceScreen({
 
   async function submitAgent() {
     if (!pendingDevice) return setError('主机信息已失效，请重新添加');
+    if (!provider) return setError('请选择服务商');
     if (apiKey.trim().length < 8) return setError('请输入有效的 API Key');
     setError('');
     setLoading(true);
@@ -623,7 +726,7 @@ function AddDeviceScreen({
             <>
               <Text style={styles.setupTitle}>设置模型服务</Text>
               <Text style={styles.setupDescription}>主机已联网。选择服务商并填写 API Key，模型名称可留空并使用 Pi agent 默认值。</Text>
-              <ProviderPicker onChange={setProvider} provider={provider} />
+              <ProviderPicker onChange={setProvider} provider={provider} providers={providers} />
               <View style={styles.formBlockCompact}>
                 <Field label="API Key" onChangeText={setApiKey} placeholder="输入服务商 API Key" secureTextEntry value={apiKey} />
                 <Field label="模型（选填）" onChangeText={setModel} placeholder="例如 gpt-5-mini" value={model} />
@@ -916,7 +1019,6 @@ function DeviceDetailScreen({
   onRefresh: () => void;
   onRelease: () => void;
 }) {
-  const providerLabel = agentProviders.find((item) => item.id === device.agentProvider)?.label;
   return (
     <View style={styles.fullPage}>
       <PageHeader
@@ -949,7 +1051,7 @@ function DeviceDetailScreen({
             icon="key"
             label="模型服务"
             onPress={onConfigure}
-            value={providerLabel ?? '设置'}
+            value={device.agentProvider ?? '设置'}
           />
         </View>
         <Pressable accessibilityRole="button" onPress={onRelease} style={({ pressed }) => [styles.dangerAction, pressed && styles.pressed]}>
@@ -970,12 +1072,14 @@ function AgentConfigScreen({
   device: Device;
   onBack: () => void;
   onLoad: () => Promise<AgentConfiguration>;
-  onSave: (provider: AgentProvider, apiKey: string | undefined, model: string) => Promise<void>;
+  onSave: (provider: AgentProvider, apiKey: string | undefined, model: string) => Promise<AgentConfiguration>;
 }) {
   const [provider, setProvider] = useState<AgentProvider>(device.agentProvider ?? 'openai');
   const [configuredProvider, setConfiguredProvider] = useState<AgentProvider | null>(device.agentProvider ?? null);
+  const [providers, setProviders] = useState<AgentProviderOption[]>([]);
   const [apiKey, setApiKey] = useState('');
   const [model, setModel] = useState(device.agentModel ?? '');
+  const [models, setModels] = useState<AgentModelOption[]>([]);
   const [loadingConfig, setLoadingConfig] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -986,10 +1090,16 @@ function AgentConfigScreen({
     let active = true;
     onLoad()
       .then((config) => {
-        if (!active || !config.configured || !config.provider) return;
-        setProvider(config.provider);
-        setConfiguredProvider(config.provider);
-        setModel(config.model);
+        if (!active) return;
+        setProviders(config.providers);
+        setModels(config.models);
+        if (config.configured && config.provider) {
+          setProvider(config.provider);
+          setConfiguredProvider(config.provider);
+          setModel(config.model);
+        } else if (config.providers.length) {
+          setProvider(config.providers[0].id);
+        }
       })
       .catch((loadError) => {
         if (active) setError(errorMessage(loadError));
@@ -1008,9 +1118,12 @@ function AgentConfigScreen({
     setSaved(false);
     setLoading(true);
     try {
-      await onSave(provider, nextKey || undefined, model.trim());
+      const config = await onSave(provider, nextKey || undefined, model.trim());
       setApiKey('');
       setConfiguredProvider(provider);
+      setProviders(config.providers);
+      setModels(config.models);
+      setModel(config.model);
       setSaved(true);
     } catch (requestError) {
       setError(errorMessage(requestError));
@@ -1032,7 +1145,17 @@ function AgentConfigScreen({
               <Text style={styles.configLoadingText}>正在读取主机当前配置</Text>
             </View>
           )}
-          <ProviderPicker onChange={(value) => { setProvider(value); setSaved(false); setError(''); }} provider={provider} />
+          <ProviderPicker
+            onChange={(value) => {
+              setProvider(value);
+              setModel('');
+              if (value !== configuredProvider) setModels([]);
+              setSaved(false);
+              setError('');
+            }}
+            provider={provider}
+            providers={providers}
+          />
           <View style={styles.formBlockCompact}>
             <Field
               label={requiresApiKey ? 'API Key' : '新 API Key（选填）'}
@@ -1041,7 +1164,12 @@ function AgentConfigScreen({
               secureTextEntry
               value={apiKey}
             />
-            <Field label="模型（选填）" onChangeText={(value) => { setModel(value); setSaved(false); }} placeholder="留空使用 Pi agent 默认模型" value={model} />
+            {!!models.length && <ModelPicker model={model} models={models} onChange={(value) => { setModel(value); setSaved(false); }} />}
+            {!models.length && (
+              <Text style={styles.modelHint}>
+                {requiresApiKey ? '保存新服务商和 API Key 后，将读取 Pi 提供的可用模型。' : 'Pi 暂未返回该服务商的可用模型，将使用默认模型。'}
+              </Text>
+            )}
             <View style={styles.securityNote}>
               <Icon color={colors.success} name="lock" size={20} />
               <Text style={styles.securityNoteText}>Key 仅经服务端实时转发并保存在当前主机，不会写入云端数据库。</Text>
@@ -1226,7 +1354,7 @@ function MainScreen({
   sending: boolean;
   onAddDevice: (device: Device) => Promise<void>;
   onCreateConversation: (deviceId: string) => Promise<Conversation>;
-  onConfigureDevice: (deviceId: string, provider: AgentProvider, apiKey: string | undefined, model: string) => Promise<void>;
+  onConfigureDevice: (deviceId: string, provider: AgentProvider, apiKey: string | undefined, model: string) => Promise<AgentConfiguration>;
   onLoadDeviceConfig: (deviceId: string) => Promise<AgentConfiguration>;
   onRefreshDevice: (deviceId: string) => Promise<void>;
   onReleaseDevice: (deviceId: string) => Promise<void>;
@@ -1422,21 +1550,23 @@ function AppContent() {
     provider: AgentProvider,
     apiKey: string | undefined,
     model: string,
-  ) {
-    if (!session) return;
+  ): Promise<AgentConfiguration> {
+    if (!session) throw new Error('登录状态已失效');
     await configureDeviceAgent(session.token, deviceId, provider, apiKey, model);
+    const config = await getDeviceAgentConfig(session.token, deviceId);
     await updateSession({
       ...session,
       devices: session.devices.map((device) => device.id === deviceId ? {
         ...device,
-        agentProvider: provider,
-        agentModel: model || undefined,
+        agentProvider: config.provider || provider,
+        agentModel: config.model || undefined,
       } : device),
     });
+    return config;
   }
 
   async function loadAgentConfig(deviceId: string) {
-    if (!session) return { configured: false, provider: '', model: '' } as AgentConfiguration;
+    if (!session) throw new Error('登录状态已失效');
     const config = await getDeviceAgentConfig(session.token, deviceId);
     if (config.configured && config.provider) {
       await updateSession({
@@ -1615,13 +1745,25 @@ const styles = StyleSheet.create({
   wifiNetworkNameSelected: { color: colors.accent },
   wifiNetworkMeta: { color: colors.subtle, fontSize: 12, marginTop: 4 },
   wifiScanError: { color: colors.warning, fontSize: 13, lineHeight: 19, marginBottom: 4 },
-  providerGroup: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 24 },
-  providerOption: { alignItems: 'center', backgroundColor: colors.surface, borderColor: colors.line, borderRadius: 8, borderWidth: 1, flexDirection: 'row', minHeight: 48, paddingHorizontal: 14, width: '48%' },
-  providerOptionSelected: { backgroundColor: colors.accentSoft, borderColor: colors.accent },
+  providerPicker: { marginTop: 24 },
+  selectControl: { alignItems: 'center', backgroundColor: colors.surface, borderColor: colors.line, borderRadius: 8, borderWidth: 1, flexDirection: 'row', minHeight: 54, paddingHorizontal: 16 },
+  selectValue: { color: colors.ink, flex: 1, fontSize: 16, fontWeight: '600', marginRight: 10 },
+  selectPlaceholder: { color: colors.subtle, flex: 1, fontSize: 16, marginRight: 10 },
+  selectMenu: { backgroundColor: colors.surface, borderColor: colors.line, borderRadius: 8, borderWidth: 1, marginTop: 8, overflow: 'hidden' },
+  selectSearch: { backgroundColor: colors.background, borderBottomColor: colors.line, borderBottomWidth: 1, color: colors.ink, fontSize: 15, height: 52, paddingHorizontal: 15 },
+  selectRow: { alignItems: 'center', flexDirection: 'row', minHeight: 58, paddingHorizontal: 15, paddingVertical: 9 },
+  selectRowSelected: { backgroundColor: colors.accentSoft },
+  selectRowCopy: { flex: 1, marginLeft: 10, minWidth: 0 },
+  selectEmpty: { color: colors.muted, fontSize: 14, padding: 16, textAlign: 'center' },
   providerRadio: { borderColor: colors.subtle, borderRadius: 999, borderWidth: 2, height: 18, marginRight: 9, width: 18 },
   providerRadioSelected: { backgroundColor: colors.accent, borderColor: colors.accent, borderWidth: 5 },
   providerLabel: { color: colors.ink, flexShrink: 1, fontSize: 14, fontWeight: '600' },
   providerLabelSelected: { color: colors.accent },
+  providerId: { color: colors.subtle, fontSize: 11, marginTop: 3 },
+  modelPicker: { marginBottom: 17 },
+  modelList: { backgroundColor: colors.surface, borderColor: colors.line, borderRadius: 8, borderWidth: 1, overflow: 'hidden' },
+  modelRow: { alignItems: 'center', flexDirection: 'row', minHeight: 62, paddingHorizontal: 15, paddingVertical: 9 },
+  modelHint: { color: colors.muted, fontSize: 13, lineHeight: 20, marginBottom: 17 },
   formBlockCompact: { marginTop: 22 },
   securityNote: { alignItems: 'center', backgroundColor: colors.successSoft, borderRadius: 8, flexDirection: 'row', marginBottom: 17, minHeight: 52, paddingHorizontal: 14, paddingVertical: 10 },
   securityNoteText: { color: colors.success, flex: 1, fontSize: 13, lineHeight: 19, marginLeft: 10 },

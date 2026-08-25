@@ -9,7 +9,7 @@ import unittest
 import urllib.request
 from pathlib import Path
 from subprocess import CompletedProcess
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from daemon import (
     PiRpcAgent,
@@ -348,6 +348,13 @@ class ProvisioningTest(unittest.TestCase):
             with patch.dict(os.environ, {}, clear=False):
                 apply_agent_config(saved)
                 self.assertEqual(os.environ["ANTHROPIC_API_KEY"], "sk-ant-test")
+            deepseek = save_agent_config(
+                path,
+                {"provider": "deepseek", "apiKey": "sk-deepseek-test", "model": ""},
+            )
+            with patch.dict(os.environ, {}, clear=False):
+                apply_agent_config(deepseek)
+                self.assertEqual(os.environ["DEEPSEEK_API_KEY"], "sk-deepseek-test")
 
     def test_applies_relayed_agent_configuration(self) -> None:
         class FakeWebsocket:
@@ -408,24 +415,32 @@ class ProvisioningTest(unittest.TestCase):
                 {"provider": "google", "apiKey": "private-key", "model": "gemini-test"},
             )
             websocket = FakeWebsocket()
-            asyncio.run(
-                handle_agent_config_query(
-                    websocket,
-                    {"requestId": "config-read-1"},
-                    path,
+            agent = PiRpcAgent("pi", Path(directory) / "sessions", Path(directory))
+            with patch.object(
+                agent,
+                "available_models",
+                AsyncMock(return_value=[{
+                    "id": "gemini-test",
+                    "name": "Gemini Test",
+                    "reasoning": True,
+                    "contextWindow": 1000000,
+                }]),
+            ):
+                asyncio.run(
+                    handle_agent_config_query(
+                        websocket,
+                        {"requestId": "config-read-1"},
+                        agent,
+                        path,
+                    )
                 )
-            )
-            self.assertEqual(
-                websocket.messages,
-                [{
-                    "type": "agent.config",
-                    "requestId": "config-read-1",
-                    "configured": True,
-                    "provider": "google",
-                    "model": "gemini-test",
-                }],
-            )
-            self.assertNotIn("apiKey", websocket.messages[0])
+            response = websocket.messages[0]
+            self.assertEqual(response["type"], "agent.config")
+            self.assertEqual(response["provider"], "google")
+            self.assertEqual(response["model"], "gemini-test")
+            self.assertGreater(len(response["providers"]), 20)
+            self.assertEqual(response["models"][0]["id"], "gemini-test")
+            self.assertNotIn("apiKey", response)
 
 
 if __name__ == "__main__":

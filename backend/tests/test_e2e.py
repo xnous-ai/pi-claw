@@ -187,6 +187,18 @@ class BackendFlowTest(unittest.TestCase):
                             "configured": True,
                             "provider": "openai",
                             "model": "gpt-next",
+                            "providers": [
+                                {"id": "openai", "label": "OpenAI"},
+                                {"id": "deepseek", "label": "DeepSeek"},
+                            ],
+                            "models": [
+                                {
+                                    "id": "gpt-next",
+                                    "name": "GPT Next",
+                                    "reasoning": True,
+                                    "contextWindow": 200000,
+                                }
+                            ],
                         }
                     )
                 )
@@ -245,7 +257,23 @@ class BackendFlowTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(
             config,
-            {"configured": True, "provider": "openai", "model": "gpt-next"},
+            {
+                "configured": True,
+                "provider": "openai",
+                "model": "gpt-next",
+                "providers": [
+                    {"id": "openai", "label": "OpenAI"},
+                    {"id": "deepseek", "label": "DeepSeek"},
+                ],
+                "models": [
+                    {
+                        "id": "gpt-next",
+                        "name": "GPT Next",
+                        "reasoning": True,
+                        "contextWindow": 200000,
+                    }
+                ],
+            },
         )
 
         status, reply = http_json(
