@@ -397,6 +397,13 @@ class BackendFlowTest(unittest.TestCase):
         self.assertEqual(removed["installed"], [])
         host.join(timeout=5)
 
+        status, offline_catalog = http_json(
+            f"{self.base}/v1/devices/{device['id']}/capabilities",
+            token=token,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(offline_catalog[0]["id"], "test-extension")
+
         status, _ = http_json(
             f"{self.base}/v1/devices/{device['id']}/claim", "DELETE", token=token
         )

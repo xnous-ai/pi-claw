@@ -137,7 +137,13 @@ class Relay:
         finally:
             connection.pending.pop(request_id, None)
 
-    async def capability(self, device_id: str, action: str, data: dict | None = None) -> dict:
+    async def capability(
+        self,
+        device_id: str,
+        action: str,
+        data: dict | None = None,
+        timeout: float = 120,
+    ) -> dict:
         connection = self._hosts.get(device_id)
         if not connection:
             raise HostOffline
@@ -156,7 +162,7 @@ class Relay:
                     )
             except (OSError, RuntimeError) as error:
                 raise HostOffline from error
-            return await asyncio.wait_for(pending.future, timeout=120)
+            return await asyncio.wait_for(pending.future, timeout=timeout)
         finally:
             connection.pending.pop(request_id, None)
 

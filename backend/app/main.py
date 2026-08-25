@@ -762,10 +762,13 @@ async def get_device_capabilities(
     db: Session = Depends(get_db),
 ) -> list[dict]:
     device = owned_device(device_id, user, db)
-    if not relay.is_online(device.id):
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "主机当前离线")
-    response = await capability_request(device.id, "list")
-    installed_items = response.get("installed", [])
+    installed_items = []
+    if relay.is_online(device.id):
+        try:
+            response = await relay.capability(device.id, "list", timeout=5)
+            installed_items = response.get("installed", [])
+        except (HostOffline, TimeoutError, RuntimeError):
+            pass
     installed = {
         str(item.get("id")): item
         for item in installed_items
