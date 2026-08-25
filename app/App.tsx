@@ -897,12 +897,20 @@ function ChatScreen({
       >
         <Text style={styles.dateDividerText}>今天</Text>
         {conversation.messages.map((message) => (
-          <View key={message.id} style={[styles.messageRow, message.role === 'user' && styles.userMessageRow]}>
-            {message.role === 'assistant' && <View style={styles.agentAvatar}><Text style={styles.agentAvatarText}>P</Text></View>}
-            <View style={[styles.messageBubble, message.role === 'user' ? styles.userBubble : styles.agentBubble]}>
-              <Text style={message.role === 'user' ? styles.userMessageText : styles.agentMessageText}>{message.text}</Text>
-              <Text style={message.role === 'user' ? styles.userTime : styles.agentTime}>{formatTime(message.createdAt)}</Text>
+          <View key={message.id} style={styles.messageGroup}>
+            <View style={[styles.messageRow, message.role === 'user' && styles.userMessageRow]}>
+              {message.role === 'assistant' && <View style={styles.agentAvatar}><Text style={styles.agentAvatarText}>P</Text></View>}
+              <View style={[styles.messageBubble, message.role === 'user' ? styles.userBubble : styles.agentBubble]}>
+                <Text style={message.role === 'user' ? styles.userMessageText : styles.agentMessageText}>{message.text}</Text>
+                <Text style={message.role === 'user' ? styles.userTime : styles.agentTime}>{formatTime(message.createdAt)}</Text>
+              </View>
             </View>
+            {message.role === 'user' && !!message.error && (
+              <View style={styles.messageError}>
+                <Icon color={colors.danger} name="error" size={15} />
+                <Text accessibilityLiveRegion="polite" style={styles.messageErrorText}>{message.error}</Text>
+              </View>
+            )}
           </View>
         ))}
         {sending && (
@@ -1627,16 +1635,25 @@ function AppContent() {
     setConversations((current) => current.map((item) => item.id === conversationId ? pending : item));
     setSending(true);
     try {
-      const reply = await sendAgentMessage(session.token, original.deviceId, conversationId, text);
+      let reply: AgentMessage;
+      try {
+        reply = await sendAgentMessage(session.token, original.deviceId, conversationId, text);
+      } catch (sendError) {
+        const failedMessage = { ...userMessage, error: errorMessage(sendError) };
+        const failed = { ...pending, messages: [...original.messages, failedMessage] };
+        const next = conversations
+          .map((item) => item.id === conversationId ? failed : item)
+          .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+        setConversations(next);
+        await saveConversations(next);
+        return;
+      }
       const completed = { ...pending, updatedAt: reply.createdAt, messages: [...pending.messages, reply] };
       const next = conversations
         .map((item) => item.id === conversationId ? completed : item)
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
       setConversations(next);
       await saveConversations(next);
-    } catch (sendError) {
-      setConversations(conversations);
-      throw sendError;
     } finally {
       setSending(false);
     }
@@ -1793,7 +1810,8 @@ const styles = StyleSheet.create({
   emptyText: { color: colors.muted, fontSize: 14, lineHeight: 21, marginBottom: 24, marginTop: 8, textAlign: 'center' },
   messageList: { flexGrow: 1, paddingBottom: 22, paddingHorizontal: 16, paddingTop: 16 },
   dateDividerText: { color: colors.subtle, fontSize: 12, marginBottom: 20, textAlign: 'center' },
-  messageRow: { alignItems: 'flex-end', flexDirection: 'row', marginBottom: 16 },
+  messageGroup: { marginBottom: 16 },
+  messageRow: { alignItems: 'flex-end', flexDirection: 'row' },
   userMessageRow: { justifyContent: 'flex-end' },
   agentAvatar: { alignItems: 'center', backgroundColor: colors.ink, borderRadius: 8, height: 30, justifyContent: 'center', marginRight: 8, width: 30 },
   agentAvatarText: { color: colors.surface, fontSize: 14, fontWeight: '800' },
@@ -1804,6 +1822,8 @@ const styles = StyleSheet.create({
   userMessageText: { color: colors.surface, fontSize: 15, lineHeight: 22 },
   agentTime: { color: colors.subtle, fontSize: 10, marginTop: 6 },
   userTime: { color: '#C6D0E0', fontSize: 10, marginTop: 6, textAlign: 'right' },
+  messageError: { alignItems: 'flex-start', alignSelf: 'flex-end', flexDirection: 'row', marginTop: 6, maxWidth: '79%' },
+  messageErrorText: { color: colors.danger, flexShrink: 1, fontSize: 12, lineHeight: 17, marginLeft: 5, textAlign: 'right' },
   typingBubble: { alignItems: 'center', flexDirection: 'row', paddingBottom: 12 },
   typingText: { color: colors.muted, fontSize: 13, marginLeft: 8 },
   composerError: { backgroundColor: colors.dangerSoft, color: colors.danger, fontSize: 12, lineHeight: 18, paddingHorizontal: 16, paddingVertical: 7 },

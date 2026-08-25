@@ -26,6 +26,7 @@ export type AgentMessage = {
   role: 'assistant' | 'user';
   text: string;
   createdAt: string;
+  error?: string;
 };
 
 export type Conversation = {
