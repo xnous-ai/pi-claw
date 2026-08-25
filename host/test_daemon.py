@@ -18,6 +18,7 @@ from daemon import (
     connect_wifi,
     has_network_connection,
     handle_agent_configuration,
+    handle_chat,
     load_agent_config,
     message_text,
     refresh_hotspot_networks,
@@ -83,6 +84,40 @@ class PiRpcAgentTest(unittest.TestCase):
             ),
             "完成",
         )
+
+    def test_logs_chat_lifecycle_without_message_text(self) -> None:
+        class FakeWebsocket:
+            def __init__(self) -> None:
+                self.messages: list[dict] = []
+
+            async def send(self, value: str) -> None:
+                self.messages.append(json.loads(value))
+
+        class ReplyAgent(PiRpcAgent):
+            async def stream(self, conversation_id: str, text: str):
+                yield "reply"
+
+        websocket = FakeWebsocket()
+        agent = ReplyAgent("pi", Path("sessions"), Path("workspace"), "openai", "gpt-test")
+        with patch("builtins.print") as output:
+            asyncio.run(
+                handle_chat(
+                    websocket,
+                    {
+                        "requestId": "request-1",
+                        "conversationId": "conversation-1",
+                        "text": "private message",
+                    },
+                    agent,
+                    5,
+                )
+            )
+
+        logs = " ".join(str(call) for call in output.call_args_list)
+        self.assertIn("收到聊天请求", logs)
+        self.assertIn("聊天完成", logs)
+        self.assertNotIn("private message", logs)
+        self.assertEqual(websocket.messages[-1]["type"], "chat.complete")
 
 
 class ProvisioningTest(unittest.TestCase):

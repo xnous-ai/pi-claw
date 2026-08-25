@@ -574,12 +574,20 @@ async def heartbeat(websocket) -> None:
 
 async def handle_chat(websocket, message: dict, agent: PiRpcAgent, timeout: int) -> None:
     request_id = str(message.get("requestId", ""))
+    conversation_id = str(message.get("conversationId", ""))
+    session_id = agent.session_id(conversation_id) if conversation_id else "unknown"
+    started_at = time.monotonic()
     try:
-        if not request_id or not message.get("conversationId") or not message.get("text"):
+        if not request_id or not conversation_id or not message.get("text"):
             raise ValueError("聊天请求无效")
+        print(
+            f"收到聊天请求：request={request_id} session={session_id} "
+            f"provider={agent.provider or 'default'} model={agent.model or 'default'}",
+            flush=True,
+        )
 
         async def forward_response() -> None:
-            async for delta in agent.stream(str(message["conversationId"]), str(message["text"])):
+            async for delta in agent.stream(conversation_id, str(message["text"])):
                 await websocket.send(
                     json.dumps(
                         {"type": "chat.delta", "requestId": request_id, "delta": delta},
@@ -597,7 +605,17 @@ async def handle_chat(websocket, message: dict, agent: PiRpcAgent, timeout: int)
                 }
             )
         )
+        print(
+            f"聊天完成：request={request_id} session={session_id} "
+            f"elapsed={time.monotonic() - started_at:.1f}s",
+            flush=True,
+        )
     except Exception as error:
+        print(
+            f"聊天失败：request={request_id or 'unknown'} session={session_id} "
+            f"error={str(error)[:200] or type(error).__name__}",
+            flush=True,
+        )
         await websocket.send(
             json.dumps(
                 {
