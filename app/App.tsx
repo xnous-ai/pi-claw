@@ -23,6 +23,7 @@ import {
   isDemoMode,
   login,
   register,
+  refreshHostWifiNetworks,
   releaseDevice,
   scanHostWifiNetworks,
   sendAgentMessage,
@@ -382,11 +383,13 @@ function AddDeviceScreen({
     }
   }
 
-  async function scanWifi() {
+  async function scanWifi(refresh = false) {
     setScanningWifi(true);
     setWifiScanError('');
     try {
-      const networks = await scanHostWifiNetworks();
+      const networks = refresh
+        ? await refreshHostWifiNetworks()
+        : await scanHostWifiNetworks();
       setWifiNetworks(networks);
       setManualWifi(!networks.length);
       if (!networks.length) setWifiScanError('附近没有可用网络，请手动输入 Wi-Fi 名称');
@@ -397,6 +400,17 @@ function AddDeviceScreen({
     } finally {
       setScanningWifi(false);
     }
+  }
+
+  function confirmWifiRefresh() {
+    Alert.alert(
+      '刷新附近 Wi-Fi？',
+      '主机热点会短暂断开，恢复后 App 将自动读取新列表。',
+      [
+        { text: '取消', style: 'cancel' },
+        { text: '刷新', onPress: () => void scanWifi(true) },
+      ],
+    );
   }
 
   function openNetworkStep() {
@@ -487,7 +501,7 @@ function AddDeviceScreen({
                 <Field label="主机名称" onChangeText={setHostName} placeholder="例如 客厅主机" value={hostName} />
                 <View style={styles.wifiSectionHeader}>
                   <Text style={styles.wifiSectionLabel}>选择 Wi-Fi</Text>
-                  <IconButton icon="refresh" label="重新扫描" onPress={scanWifi} />
+                  <IconButton icon="refresh" label="重新扫描" onPress={confirmWifiRefresh} />
                 </View>
                 {scanningWifi ? (
                   <View style={styles.wifiScanning}>
@@ -533,7 +547,7 @@ function AddDeviceScreen({
                 {!scanningWifi && (
                   <TextButton
                     label={manualWifi ? '重新扫描附近 Wi-Fi' : '找不到网络？手动输入'}
-                    onPress={() => manualWifi ? void scanWifi() : setManualWifi(true)}
+                    onPress={() => manualWifi ? confirmWifiRefresh() : setManualWifi(true)}
                   />
                 )}
                 {!!error && <Text style={styles.errorText}>{error}</Text>}

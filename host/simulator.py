@@ -89,11 +89,16 @@ class SetupHandler(BaseHTTPRequestHandler):
                     {"ssid": "ClawPi Lab", "signal": 92, "secured": True},
                     {"ssid": "Home WiFi", "signal": 76, "secured": True},
                     {"ssid": "Guest", "signal": 48, "secured": False},
-                ]
+                ],
+                "refreshing": False,
+                "refreshError": "",
             },
         )
 
     def do_POST(self) -> None:
+        if self.path == "/wifi-networks/refresh":
+            self._send_json(202, {"accepted": True})
+            return
         if self.path != "/provision":
             self._send_json(404, {"detail": "接口不存在"})
             return

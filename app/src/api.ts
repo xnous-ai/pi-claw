@@ -42,6 +42,12 @@ export type WifiNetwork = {
   secured: boolean;
 };
 
+type WifiNetworksResponse = {
+  networks?: WifiNetwork[];
+  refreshing?: boolean;
+  refreshError?: string;
+};
+
 type SessionPayload = Omit<AuthSession, 'devices'> & {
   devices?: Device[];
   device?: Device | null;
@@ -49,7 +55,7 @@ type SessionPayload = Omit<AuthSession, 'devices'> & {
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '');
 const HOST_SETUP_URL =
-  process.env.EXPO_PUBLIC_HOST_SETUP_URL?.replace(/\/$/, '') || 'http://192.168.4.1';
+  process.env.EXPO_PUBLIC_HOST_SETUP_URL?.replace(/\/$/, '') || 'http://192.168.4.1:8090';
 export const isDemoMode = !API_URL;
 
 function delay(ms: number) {
@@ -138,6 +144,13 @@ export async function register(name: string, email: string, password: string): P
   return normalizeSession(session);
 }
 
+function wifiNetworks(response: WifiNetworksResponse): WifiNetwork[] {
+  if (!Array.isArray(response.networks)) throw new Error('主机返回了无效的 Wi-Fi 列表');
+  return response.networks.filter(
+    (network) => network?.ssid && Number.isFinite(network.signal),
+  );
+}
+
 export async function scanHostWifiNetworks(): Promise<WifiNetwork[]> {
   if (isDemoMode) {
     await delay(450);
@@ -146,16 +159,42 @@ export async function scanHostWifiNetworks(): Promise<WifiNetwork[]> {
       { ssid: 'Guest', signal: 61, secured: false },
     ];
   }
-  const response = await requestUrl<{ networks?: WifiNetwork[] }>(
+  const response = await requestUrl<WifiNetworksResponse>(
     `${HOST_SETUP_URL}/wifi-networks`,
     { method: 'GET' },
     undefined,
-    10_000,
+    30_000,
   );
-  if (!Array.isArray(response.networks)) throw new Error('主机返回了无效的 Wi-Fi 列表');
-  return response.networks.filter(
-    (network) => network?.ssid && Number.isFinite(network.signal),
+  return wifiNetworks(response);
+}
+
+export async function refreshHostWifiNetworks(): Promise<WifiNetwork[]> {
+  if (isDemoMode) return scanHostWifiNetworks();
+  await requestUrl(
+    `${HOST_SETUP_URL}/wifi-networks/refresh`,
+    { method: 'POST' },
+    undefined,
+    5_000,
   );
+
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 15; attempt += 1) {
+    await delay(2_000);
+    try {
+      const response = await requestUrl<WifiNetworksResponse>(
+        `${HOST_SETUP_URL}/wifi-networks`,
+        { method: 'GET' },
+        undefined,
+        3_000,
+      );
+      if (response.refreshing) continue;
+      if (response.refreshError) throw new Error(response.refreshError);
+      return wifiNetworks(response);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new Error(`热点恢复超时：${lastError instanceof Error ? lastError.message : '请重新连接主机热点'}`);
 }
 
 export async function configureDeviceNetwork(

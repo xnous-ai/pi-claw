@@ -19,6 +19,7 @@ from daemon import (
     handle_agent_configuration,
     load_agent_config,
     message_text,
+    refresh_hotspot_networks,
     run_nmcli,
     run_host,
     save_agent_config,
@@ -101,16 +102,17 @@ class ProvisioningTest(unittest.TestCase):
             return json.load(response)
 
     def test_completes_setup_after_receiving_network(self) -> None:
-        server = ProvisioningServer(("127.0.0.1", 0), "http://cloud.local", True)
+        server = ProvisioningServer(
+            ("127.0.0.1", 0),
+            "http://cloud.local",
+            True,
+            wifi_networks=[{"ssid": "Home WiFi", "signal": 84, "secured": True}],
+        )
         thread = threading.Thread(target=server.serve_forever)
         thread.start()
         base_url = f"http://127.0.0.1:{server.server_port}"
         try:
-            with patch(
-                "daemon.scan_wifi_networks",
-                return_value=[{"ssid": "Home WiFi", "signal": 84, "secured": True}],
-            ):
-                scanned = self.get(base_url, "/wifi-networks")
+            scanned = self.get(base_url, "/wifi-networks")
             self.assertEqual(scanned["networks"][0]["ssid"], "Home WiFi")
             network = self.post(
                 base_url,
@@ -172,6 +174,36 @@ class ProvisioningTest(unittest.TestCase):
             stop_hotspot("clawpi-setup")
         self.assertEqual(nmcli.call_count, 2)
         self.assertTrue(all(call.kwargs["check"] is False for call in nmcli.call_args_list))
+
+    def test_restores_hotspot_when_refresh_scan_fails(self) -> None:
+        with patch("daemon.stop_hotspot") as stop, patch(
+            "daemon.scan_wifi_networks", side_effect=RuntimeError("scan failed")
+        ), patch("daemon.start_hotspot") as start, patch("daemon.time.sleep"):
+            with self.assertRaisesRegex(RuntimeError, "scan failed"):
+                refresh_hotspot_networks("wlp1s0", "clawpi-setup", "ClawPi-Test", "12345678")
+        stop.assert_called_once_with("clawpi-setup")
+        start.assert_called_once_with("wlp1s0", "clawpi-setup", "ClawPi-Test", "12345678")
+
+    def test_allows_only_one_wifi_refresh_at_a_time(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+
+        def refresh() -> list[dict]:
+            started.set()
+            release.wait(2)
+            return []
+
+        server = ProvisioningServer(
+            ("127.0.0.1", 0), "https://cloud.local", False, refresh_wifi=refresh
+        )
+        try:
+            self.assertTrue(server.start_wifi_refresh())
+            self.assertTrue(started.wait(2))
+            self.assertFalse(server.start_wifi_refresh())
+            release.set()
+        finally:
+            release.set()
+            server.server_close()
 
     def test_stops_waiting_for_setup_when_network_is_lost(self) -> None:
         with patch("daemon.has_network_connection", return_value=False):

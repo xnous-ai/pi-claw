@@ -185,6 +185,17 @@ def stop_hotspot(connection: str) -> None:
     run_nmcli("connection", "down", connection, check=False)
 
 
+def refresh_hotspot_networks(
+    interface: str, connection: str, ssid: str, password: str
+) -> list[dict]:
+    stop_hotspot(connection)
+    time.sleep(1)
+    try:
+        return scan_wifi_networks(interface)
+    finally:
+        start_hotspot(interface, connection, ssid, password)
+
+
 def connect_wifi(interface: str, hotspot_connection: str, ssid: str, password: str) -> None:
     run_nmcli("connection", "modify", hotspot_connection, "connection.autoconnect", "no")
     run_nmcli("connection", "down", hotspot_connection, check=False)
@@ -209,13 +220,45 @@ def connect_wifi(interface: str, hotspot_connection: str, ssid: str, password: s
 class ProvisioningServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
-    def __init__(self, address, cloud_url: str, allow_http: bool, wifi_interface: str = "wlan0"):
+    def __init__(
+        self,
+        address,
+        cloud_url: str,
+        allow_http: bool,
+        wifi_interface: str = "wlan0",
+        wifi_networks: list[dict] | None = None,
+        refresh_wifi=None,
+    ):
         super().__init__(address, ProvisioningHandler)
         self.cloud_url = cloud_url.rstrip("/")
         self.allow_http = allow_http
         self.wifi_interface = wifi_interface
+        self.wifi_networks = wifi_networks
+        self.refresh_wifi = refresh_wifi
+        self.wifi_refreshing = False
+        self.wifi_refresh_error = ""
+        self.wifi_refresh_lock = threading.Lock()
         self.completed = False
         self.result: queue.Queue[dict] = queue.Queue(maxsize=1)
+
+    def start_wifi_refresh(self) -> bool:
+        with self.wifi_refresh_lock:
+            if self.wifi_refreshing or not self.refresh_wifi:
+                return False
+            self.wifi_refreshing = True
+            self.wifi_refresh_error = ""
+
+        def refresh() -> None:
+            time.sleep(0.5)
+            try:
+                self.wifi_networks = self.refresh_wifi()
+            except Exception as error:
+                self.wifi_refresh_error = str(error) or "刷新 Wi-Fi 失败"
+            finally:
+                self.wifi_refreshing = False
+
+        threading.Thread(target=refresh, daemon=True).start()
+        return True
 
 
 class ProvisioningHandler(BaseHTTPRequestHandler):
@@ -243,11 +286,28 @@ class ProvisioningHandler(BaseHTTPRequestHandler):
             self._send_json(404, {"detail": "接口不存在"})
             return
         try:
-            self._send_json(200, {"networks": scan_wifi_networks(self.server.wifi_interface)})
+            networks = self.server.wifi_networks
+            if networks is None:
+                networks = scan_wifi_networks(self.server.wifi_interface)
+            self._send_json(
+                200,
+                {
+                    "networks": networks,
+                    "refreshing": self.server.wifi_refreshing,
+                    "refreshError": self.server.wifi_refresh_error,
+                },
+            )
         except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
             self._send_json(503, {"detail": str(error) or "主机当前无法扫描 Wi-Fi"})
 
     def do_POST(self) -> None:
+        if self.path == "/wifi-networks/refresh":
+            if not self.server.refresh_wifi:
+                self._send_json(409, {"detail": "当前模式不支持刷新 Wi-Fi"})
+                return
+            accepted = self.server.start_wifi_refresh()
+            self._send_json(202, {"accepted": accepted})
+            return
         if self.path != "/provision":
             self._send_json(404, {"detail": "接口不存在"})
             return
@@ -293,8 +353,12 @@ def wait_for_setup(
     allow_http: bool,
     wifi_interface: str,
     monitor_network: bool = False,
+    wifi_networks: list[dict] | None = None,
+    refresh_wifi=None,
 ) -> dict | None:
-    server = ProvisioningServer((host, port), cloud_url, allow_http, wifi_interface)
+    server = ProvisioningServer(
+        (host, port), cloud_url, allow_http, wifi_interface, wifi_networks, refresh_wifi
+    )
     network_lost = threading.Event()
 
     def stop_when_offline() -> None:
@@ -661,8 +725,7 @@ def main() -> None:
         args.server = credentials.get("server", args.server)
 
     network_connected = has_network_connection()
-    if network_connected:
-        stop_hotspot(args.hotspot_connection)
+    stop_hotspot(args.hotspot_connection)
     if credentials is None or not network_connected:
         if not args.server:
             raise SystemExit("首次启动必须配置 CLAWPI_SERVER_URL")
@@ -670,9 +733,22 @@ def main() -> None:
             print("未检测到可用网络，进入热点配网模式", flush=True)
         else:
             print("主机已联网，等待 App 通过当前局域网完成绑定", flush=True)
+        wifi_networks = None
+        refresh_wifi = None
         if not network_connected and not args.skip_hotspot:
+            try:
+                wifi_networks = scan_wifi_networks(args.wifi_interface)
+            except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+                wifi_networks = []
+                print(f"热点启动前扫描 Wi-Fi 失败：{error}", flush=True)
             ssid = f"ClawPi-{args.serial[-6:]}"
             start_hotspot(args.wifi_interface, args.hotspot_connection, ssid, args.setup_password)
+            refresh_wifi = lambda: refresh_hotspot_networks(
+                args.wifi_interface,
+                args.hotspot_connection,
+                ssid,
+                args.setup_password,
+            )
             print(f"配网热点已启动：{ssid}", flush=True)
         setup = wait_for_setup(
             args.setup_host,
@@ -681,6 +757,8 @@ def main() -> None:
             args.allow_http,
             args.wifi_interface,
             monitor_network=network_connected,
+            wifi_networks=wifi_networks,
+            refresh_wifi=refresh_wifi,
         )
         if setup is None:
             print("等待绑定期间网络断开，重启后进入热点配网模式", flush=True)
