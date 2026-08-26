@@ -1284,8 +1284,16 @@ async def handle_conversations(
             conversation_id = str(message.get("conversationId") or "")[:128]
             if not conversation_id:
                 raise ValueError("会话 ID 无效")
+            print(
+                f"收到删除会话请求：request={request_id} conversation={conversation_id}",
+                flush=True,
+            )
             delete_conversation(path, conversation_id, agent)
             conversations = conversation_list(path)
+            print(
+                f"会话已删除：request={request_id} conversation={conversation_id}",
+                flush=True,
+            )
         else:
             raise ValueError("不支持的会话操作")
         await websocket.send(
@@ -1299,6 +1307,10 @@ async def handle_conversations(
             )
         )
     except Exception as error:
+        print(
+            f"会话操作失败：request={request_id or '-'} error={error}",
+            flush=True,
+        )
         await websocket.send(
             json.dumps(
                 {
