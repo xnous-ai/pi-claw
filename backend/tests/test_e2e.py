@@ -263,6 +263,30 @@ class BackendFlowTest(unittest.TestCase):
                     "diskTotalBytes": 100_000_000_000,
                     "sampledAt": "2026-08-26T08:00:00Z",
                 }))
+                conversation_sync = json.loads(await websocket.recv())
+                self.assertEqual(conversation_sync["type"], "conversation.sync")
+                self.assertEqual(conversation_sync["deviceId"], device["id"])
+                self.assertEqual(conversation_sync["conversations"][0]["id"], "conversation-old")
+                await websocket.send(json.dumps({
+                    "type": "conversation.result",
+                    "requestId": conversation_sync["requestId"],
+                    "data": {"conversations": conversation_sync["conversations"]},
+                }))
+                conversation_list = json.loads(await websocket.recv())
+                self.assertEqual(conversation_list["type"], "conversation.list")
+                await websocket.send(json.dumps({
+                    "type": "conversation.result",
+                    "requestId": conversation_list["requestId"],
+                    "data": {"conversations": conversation_sync["conversations"]},
+                }))
+                conversation_delete = json.loads(await websocket.recv())
+                self.assertEqual(conversation_delete["type"], "conversation.delete")
+                self.assertEqual(conversation_delete["conversationId"], "conversation-old")
+                await websocket.send(json.dumps({
+                    "type": "conversation.result",
+                    "requestId": conversation_delete["requestId"],
+                    "data": {"conversations": []},
+                }))
                 request = json.loads(await websocket.recv())
                 self.assertEqual(request["type"], "chat.request")
                 await websocket.send(
@@ -453,6 +477,39 @@ class BackendFlowTest(unittest.TestCase):
         self.assertEqual(system_status["cpuPercent"], 18.5)
         self.assertEqual(system_status["memoryPercent"], 42.0)
         self.assertEqual(system_status["diskPercent"], 61.5)
+
+        stored_conversation = {
+            "id": "conversation-old",
+            "title": "旧会话",
+            "deviceId": "spoofed-device",
+            "updatedAt": "2026-08-26T08:00:00Z",
+            "messages": [{
+                "id": "user-old",
+                "role": "user",
+                "text": "历史消息",
+                "createdAt": "2026-08-26T08:00:00Z",
+            }],
+        }
+        status, synced_conversations = http_json(
+            f"{self.base}/v1/devices/{device['id']}/conversations",
+            "PUT",
+            {"conversations": [stored_conversation]},
+            token,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(synced_conversations[0]["deviceId"], device["id"])
+        status, listed_conversations = http_json(
+            f"{self.base}/v1/devices/{device['id']}/conversations",
+            token=token,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(listed_conversations[0]["messages"][0]["text"], "历史消息")
+        status, _ = http_json(
+            f"{self.base}/v1/devices/{device['id']}/conversations/conversation-old",
+            "DELETE",
+            token=token,
+        )
+        self.assertEqual(status, 204)
 
         status, reply = http_json(
             f"{self.base}/v1/devices/{device['id']}/messages",

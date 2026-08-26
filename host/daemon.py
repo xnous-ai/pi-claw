@@ -1055,6 +1055,262 @@ def chat_prompt(text: str, attachments: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def utc_timestamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def clean_conversation_message(value: object) -> dict | None:
+    if not isinstance(value, dict) or value.get("role") not in {"user", "assistant"}:
+        return None
+    message_id = str(value.get("id") or "")[:128]
+    if not message_id:
+        return None
+    attachments = []
+    raw_attachments = value.get("attachments")
+    if isinstance(raw_attachments, list):
+        for item in raw_attachments[:3]:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()[:200]
+            size = item.get("size")
+            if not name or not isinstance(size, int) or size <= 0 or size > MAX_ATTACHMENT_BYTES:
+                continue
+            attachments.append(
+                {
+                    "id": str(item.get("id") or uuid4())[:128],
+                    "name": name,
+                    "mimeType": str(item.get("mimeType") or "application/octet-stream")[:200],
+                    "size": size,
+                }
+            )
+    message = {
+        "id": message_id,
+        "role": str(value["role"]),
+        "text": str(value.get("text") or "")[:100_000],
+        "createdAt": str(value.get("createdAt") or utc_timestamp())[:64],
+    }
+    if attachments:
+        message["attachments"] = attachments
+    error = str(value.get("error") or "").strip()
+    if error:
+        message["error"] = error[:1000]
+    return message
+
+
+def clean_conversation(value: object, device_id: str = "") -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    conversation_id = str(value.get("id") or "")[:128]
+    if not conversation_id:
+        return None
+    messages = []
+    raw_messages = value.get("messages")
+    if isinstance(raw_messages, list):
+        for item in raw_messages[-100:]:
+            message = clean_conversation_message(item)
+            if message:
+                messages.append(message)
+    return {
+        "id": conversation_id,
+        "title": (str(value.get("title") or "新会话").strip() or "新会话")[:80],
+        "deviceId": (str(value.get("deviceId") or device_id).strip() or device_id)[:128],
+        "updatedAt": str(value.get("updatedAt") or utc_timestamp())[:64],
+        "messages": messages,
+    }
+
+
+def load_conversation_state(path: Path) -> dict:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"conversations": [], "deleted": {}}
+    if isinstance(value, list):
+        value = {"conversations": value, "deleted": {}}
+    if not isinstance(value, dict):
+        return {"conversations": [], "deleted": {}}
+    conversations = []
+    for item in value.get("conversations", []) if isinstance(value.get("conversations"), list) else []:
+        conversation = clean_conversation(item)
+        if conversation:
+            conversations.append(conversation)
+    deleted = value.get("deleted") if isinstance(value.get("deleted"), dict) else {}
+    return {
+        "conversations": conversations[:50],
+        "deleted": {
+            str(key)[:128]: str(timestamp)[:64]
+            for key, timestamp in list(deleted.items())[-200:]
+            if str(key)
+        },
+    }
+
+
+def save_conversation_state(path: Path, state: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(f"{path.suffix}.tmp")
+    temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+    if os.name != "nt":
+        path.chmod(0o600)
+
+
+def conversation_list(path: Path) -> list[dict]:
+    return sorted(
+        load_conversation_state(path)["conversations"],
+        key=lambda item: item["updatedAt"],
+        reverse=True,
+    )
+
+
+def sync_conversations(path: Path, values: object, device_id: str) -> list[dict]:
+    if not isinstance(values, list) or len(values) > 50:
+        raise ValueError("会话同步数据无效")
+    state = load_conversation_state(path)
+    existing = {item["id"]: item for item in state["conversations"]}
+    changed = False
+    for value in values:
+        conversation = clean_conversation(value, device_id)
+        if not conversation:
+            continue
+        if conversation["id"] in state["deleted"]:
+            continue
+        current = existing.get(conversation["id"])
+        if current is None:
+            state["conversations"].append(conversation)
+            existing[conversation["id"]] = conversation
+            changed = True
+            continue
+        message_ids = {item["id"] for item in current["messages"]}
+        missing = [item for item in conversation["messages"] if item["id"] not in message_ids]
+        if missing:
+            current["messages"] = (current["messages"] + missing)[-100:]
+            changed = True
+        if conversation["updatedAt"] > current["updatedAt"]:
+            current["title"] = conversation["title"]
+            current["updatedAt"] = conversation["updatedAt"]
+            changed = True
+    if changed:
+        state["conversations"] = sorted(
+            state["conversations"], key=lambda item: item["updatedAt"], reverse=True
+        )[:50]
+        save_conversation_state(path, state)
+    return sorted(state["conversations"], key=lambda item: item["updatedAt"], reverse=True)
+
+
+def record_conversation_messages(
+    path: Path,
+    conversation_id: str,
+    device_id: str,
+    title: str,
+    messages: list[dict],
+) -> None:
+    state = load_conversation_state(path)
+    if conversation_id in state["deleted"]:
+        raise ValueError("会话已删除，请新建会话")
+    conversation = next(
+        (item for item in state["conversations"] if item["id"] == conversation_id), None
+    )
+    if conversation is None:
+        conversation = clean_conversation(
+            {
+                "id": conversation_id,
+                "deviceId": device_id,
+                "title": title,
+                "updatedAt": utc_timestamp(),
+                "messages": [],
+            },
+            device_id,
+        )
+        if conversation is None:
+            raise ValueError("会话信息无效")
+        state["conversations"].append(conversation)
+    cleaned_messages = [clean_conversation_message(item) for item in messages]
+    conversation["messages"] = (
+        conversation["messages"] + [item for item in cleaned_messages if item]
+    )[-100:]
+    conversation["title"] = (title.strip() or conversation["title"])[:80]
+    conversation["deviceId"] = (device_id or conversation["deviceId"])[:128]
+    conversation["updatedAt"] = utc_timestamp()
+    state["conversations"] = sorted(
+        state["conversations"], key=lambda item: item["updatedAt"], reverse=True
+    )[:50]
+    save_conversation_state(path, state)
+
+
+def delete_conversation(path: Path, conversation_id: str, agent: PiRpcAgent) -> None:
+    state = load_conversation_state(path)
+    state["conversations"] = [
+        item for item in state["conversations"] if item["id"] != conversation_id
+    ]
+    state["deleted"][conversation_id] = utc_timestamp()
+    state["deleted"] = dict(list(state["deleted"].items())[-200:])
+    save_conversation_state(path, state)
+
+    session_id = agent.session_id(conversation_id)
+    if agent.sessions.is_dir():
+        for session_path in sorted(agent.sessions.rglob(f"*{session_id}*"), reverse=True):
+            if session_path.is_dir():
+                shutil.rmtree(session_path, ignore_errors=True)
+            else:
+                session_path.unlink(missing_ok=True)
+    shutil.rmtree(
+        agent.workspace / ".clawpi" / "attachments" / session_id,
+        ignore_errors=True,
+    )
+
+
+async def handle_conversations(
+    websocket,
+    message: dict,
+    path: Path,
+    agent: PiRpcAgent,
+    busy: bool = False,
+) -> None:
+    request_id = str(message.get("requestId") or "")
+    try:
+        if not request_id:
+            raise ValueError("会话请求无效")
+        action = str(message.get("type") or "").removeprefix("conversation.")
+        if action == "list":
+            conversations = conversation_list(path)
+        elif action == "sync":
+            conversations = sync_conversations(
+                path,
+                message.get("conversations"),
+                str(message.get("deviceId") or ""),
+            )
+        elif action == "delete":
+            if busy:
+                raise RuntimeError("主机正在处理消息，请稍后删除")
+            conversation_id = str(message.get("conversationId") or "")[:128]
+            if not conversation_id:
+                raise ValueError("会话 ID 无效")
+            delete_conversation(path, conversation_id, agent)
+            conversations = conversation_list(path)
+        else:
+            raise ValueError("不支持的会话操作")
+        await websocket.send(
+            json.dumps(
+                {
+                    "type": "conversation.result",
+                    "requestId": request_id,
+                    "data": {"conversations": conversations},
+                },
+                ensure_ascii=False,
+            )
+        )
+    except Exception as error:
+        await websocket.send(
+            json.dumps(
+                {
+                    "type": "conversation.error",
+                    "requestId": request_id,
+                    "message": str(error)[:1000] or "会话操作失败",
+                },
+                ensure_ascii=False,
+            )
+        )
+
+
 def workspace_file_snapshot(workspace: Path) -> dict[str, tuple[int, int]]:
     snapshot: dict[str, tuple[int, int]] = {}
     if not workspace.is_dir():
@@ -1127,15 +1383,22 @@ async def handle_chat(
     agent: PiRpcAgent,
     timeout: int,
     interactions: InteractionBroker | None = None,
+    conversation_state: Path | None = None,
 ) -> None:
     request_id = str(message.get("requestId", ""))
     conversation_id = str(message.get("conversationId", ""))
     session_id = agent.session_id(conversation_id) if conversation_id else "unknown"
     started_at = time.monotonic()
+    state_path = conversation_state or agent.sessions.parent / "conversations.json"
+    response_parts: list[str] = []
+    user_message: dict | None = None
+    conversation_recorded = False
     try:
         text = str(message.get("text") or "")
         if not request_id or not conversation_id:
             raise ValueError("聊天请求无效")
+        if conversation_id in load_conversation_state(state_path)["deleted"]:
+            raise ValueError("会话已删除，请新建会话")
         attachments = save_chat_attachments(
             agent.workspace,
             conversation_id,
@@ -1143,15 +1406,27 @@ async def handle_chat(
         )
         if not text.strip() and not attachments:
             raise ValueError("聊天请求无效")
+        user_message = {
+            "id": str(message.get("clientMessageId") or f"user-{uuid4()}"),
+            "role": "user",
+            "text": text,
+            "createdAt": str(message.get("createdAt") or utc_timestamp()),
+            "attachments": [
+                {
+                    "id": str(item.get("id") or uuid4()),
+                    "name": item["name"],
+                    "mimeType": item["mimeType"],
+                    "size": item["size"],
+                }
+                for item in attachments
+            ],
+        }
         workspace_before = workspace_file_snapshot(agent.workspace)
         print(
             f"收到聊天请求：request={request_id} session={session_id} "
             f"provider={agent.provider or 'default'} model={agent.model or 'default'}",
             flush=True,
         )
-
-        response_parts: list[str] = []
-
         async def forward_response() -> None:
             async def forward_event(event: dict) -> None:
                 await websocket.send(
@@ -1174,15 +1449,34 @@ async def handle_chat(
 
         await asyncio.wait_for(forward_response(), timeout)
         generated_attachments = collect_generated_attachments(agent.workspace, workspace_before)
+        message_id = f"pi-{uuid4()}"
+        created_at = utc_timestamp()
+        assistant_message = {
+            "id": message_id,
+            "role": "assistant",
+            "text": "".join(response_parts),
+            "createdAt": created_at,
+            "attachments": generated_attachments,
+        }
+        record_conversation_messages(
+            state_path,
+            conversation_id,
+            str(message.get("deviceId") or ""),
+            str(message.get("conversationTitle") or "新会话"),
+            [user_message, assistant_message],
+        )
+        conversation_recorded = True
         await websocket.send(
             json.dumps(
                 {
                     "type": "chat.complete",
                     "requestId": request_id,
-                    "messageId": f"pi-{uuid4()}",
-                    "text": "".join(response_parts),
+                    "messageId": message_id,
+                    "createdAt": created_at,
+                    "text": assistant_message["text"],
                     "attachments": generated_attachments,
-                }
+                },
+                ensure_ascii=False,
             )
         )
         print(
@@ -1190,7 +1484,28 @@ async def handle_chat(
             f"elapsed={time.monotonic() - started_at:.1f}s",
             flush=True,
         )
+    except asyncio.CancelledError:
+        if user_message and not conversation_recorded:
+            with contextlib.suppress(Exception):
+                record_conversation_messages(
+                    state_path,
+                    conversation_id,
+                    str(message.get("deviceId") or ""),
+                    str(message.get("conversationTitle") or "新会话"),
+                    [{**user_message, "error": "已停止运行"}],
+                )
+        raise
     except Exception as error:
+        if user_message and not conversation_recorded:
+            failed_message = {**user_message, "error": str(error)[:1000] or "Agent 执行失败"}
+            with contextlib.suppress(Exception):
+                record_conversation_messages(
+                    state_path,
+                    conversation_id,
+                    str(message.get("deviceId") or ""),
+                    str(message.get("conversationTitle") or "新会话"),
+                    [failed_message],
+                )
         print(
             f"聊天失败：request={request_id or 'unknown'} session={session_id} "
             f"error={str(error)[:200] or type(error).__name__}",
@@ -1583,7 +1898,9 @@ async def run_host(
     skills_dir: Path,
     extensions_dir: Path,
     timeout: int,
+    conversation_state: Path | None = None,
 ) -> None:
+    conversation_state = conversation_state or agent.sessions.parent / "conversations.json"
     delay = 1
     while True:
         try:
@@ -1627,6 +1944,7 @@ async def run_host(
                                         agent,
                                         timeout,
                                         chat_broker,
+                                        conversation_state,
                                     )
                                 finally:
                                     chat_broker.cancel()
@@ -1660,6 +1978,14 @@ async def run_host(
                             await handle_agent_commands(websocket, message, agent)
                         elif message.get("type") == "system.status.get":
                             await handle_system_status(websocket, message)
+                        elif str(message.get("type", "")).startswith("conversation."):
+                            await handle_conversations(
+                                websocket,
+                                message,
+                                conversation_state,
+                                agent,
+                                busy=bool(active_chats),
+                            )
                         elif str(message.get("type", "")).startswith("capability."):
                             await handle_capability(
                                 websocket,
@@ -1701,6 +2027,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--credentials", type=Path, default=state_dir / "credentials.json")
     parser.add_argument("--agent-config", type=Path, default=state_dir / "agent.json")
     parser.add_argument("--capability-state", type=Path, default=state_dir / "capabilities.json")
+    parser.add_argument("--conversation-state", type=Path, default=state_dir / "conversations.json")
     parser.add_argument("--sessions", type=Path, default=state_dir / "sessions")
     parser.add_argument("--workspace", type=Path, default=state_dir / "workspace")
     parser.add_argument("--setup-host", default="0.0.0.0")
@@ -1723,6 +2050,7 @@ def main() -> None:
     args.credentials.parent.mkdir(parents=True, exist_ok=True)
     args.agent_config.parent.mkdir(parents=True, exist_ok=True)
     args.capability_state.parent.mkdir(parents=True, exist_ok=True)
+    args.conversation_state.parent.mkdir(parents=True, exist_ok=True)
     args.sessions.mkdir(parents=True, exist_ok=True)
     args.workspace.mkdir(parents=True, exist_ok=True)
     agent_config = load_agent_config(args.agent_config)
@@ -1812,6 +2140,7 @@ def main() -> None:
             Path(os.getenv("PI_CODING_AGENT_DIR", "/var/lib/clawpi/pi-config")) / "skills",
             Path(os.getenv("PI_CODING_AGENT_DIR", "/var/lib/clawpi/pi-config")) / "extensions",
             args.agent_timeout,
+            args.conversation_state,
         )
     )
 

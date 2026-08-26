@@ -31,6 +31,8 @@ API Key 不写入 ClawPi 数据库。以后修改同一服务商的模型时不�
 
 ClawPi 守护进程及其启动的 Pi 进程均以 root 运行，不创建额外的系统用户，也不使用 systemd 文件系统沙箱。每个 App 会话使用独立且稳定的 Pi session，数据保存在 `/var/lib/clawpi/sessions`；Pi 工作目录是 `/var/lib/clawpi/workspace`。这意味着 Agent、插件和 Skill 可以修改整台主机，仅应在用户独占且可信的设备上使用。
 
+会话列表和用于 App 展示的聊天正文保存在主机 `/var/lib/clawpi/conversations.json`，FastAPI 只做鉴权和实时转发，不把聊天内容写入云端数据库。App 登录新手机后会从在线主机恢复会话；删除会话会同时删除对应 Pi session 和该会话上传到主机的附件。
+
 管理员在云端后台发布 Skill、插件或 MCP 后，用户可在 App 的“主机 > 能力管理”中安装。Skill 安装到 `/var/lib/clawpi/pi-config/skills`；插件与 MCP 填写 Pi 支持的 npm 或 Git 来源，并通过 `pi install` / `pi remove` 管理。Pi 0.84.2 不原生加载 MCP，因此 MCP 包必须包含兼容 Pi 的桥接插件，不能只是普通 MCP Server。安装状态保存在 `/var/lib/clawpi/capabilities.json`，实际能力代码仍只在用户自己的主机运行。
 
 App 的主机详情会实时读取 CPU、内存和根分区硬盘占用，并扫描 Pi 配置目录中的本机能力。包含 `SKILL.md` 的 `/var/lib/clawpi/pi-config/skills/*` 目录会显示为 Skill；`/var/lib/clawpi/pi-config/extensions` 下的扩展文件或目录会显示为插件。未通过能力商店安装的条目会标记为“本地”，App 只展示、不提供卸载操作。

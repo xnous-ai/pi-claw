@@ -22,9 +22,11 @@ from daemon import (
     apply_agent_config,
     chat_prompt,
     collect_generated_attachments,
+    conversation_list,
     connect_wifi,
     cpu_usage_percent,
     discover_capabilities,
+    delete_conversation,
     has_network_connection,
     handle_agent_configuration,
     handle_agent_commands,
@@ -44,6 +46,7 @@ from daemon import (
     scan_wifi_networks,
     start_hotspot,
     stop_hotspot,
+    sync_conversations,
     wait_for_setup,
     workspace_file_snapshot,
 )
@@ -267,27 +270,97 @@ class PiRpcAgentTest(unittest.TestCase):
             async def stream(self, conversation_id: str, text: str, **_kwargs):
                 yield "reply"
 
-        websocket = FakeWebsocket()
-        agent = ReplyAgent("pi", Path("sessions"), Path("workspace"), "openai", "gpt-test")
-        with patch("builtins.print") as output:
-            asyncio.run(
-                handle_chat(
-                    websocket,
-                    {
-                        "requestId": "request-1",
-                        "conversationId": "conversation-1",
-                        "text": "private message",
-                    },
-                    agent,
-                    5,
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sessions = root / "sessions"
+            workspace = root / "workspace"
+            sessions.mkdir()
+            workspace.mkdir()
+            state = root / "conversations.json"
+            websocket = FakeWebsocket()
+            agent = ReplyAgent("pi", sessions, workspace, "openai", "gpt-test")
+            with patch("builtins.print") as output:
+                asyncio.run(
+                    handle_chat(
+                        websocket,
+                        {
+                            "requestId": "request-1",
+                            "deviceId": "device-1",
+                            "conversationId": "conversation-1",
+                            "conversationTitle": "私密会话",
+                            "clientMessageId": "user-1",
+                            "createdAt": "2026-08-26T10:00:00Z",
+                            "text": "private message",
+                        },
+                        agent,
+                        5,
+                        conversation_state=state,
+                    )
                 )
-            )
+            logs = " ".join(str(call) for call in output.call_args_list)
+            self.assertIn("收到聊天请求", logs)
+            self.assertIn("聊天完成", logs)
+            self.assertNotIn("private message", logs)
+            self.assertEqual(websocket.messages[-1]["type"], "chat.complete")
+            stored = conversation_list(state)
+            self.assertEqual(stored[0]["title"], "私密会话")
+            self.assertEqual([item["role"] for item in stored[0]["messages"]], ["user", "assistant"])
 
-        logs = " ".join(str(call) for call in output.call_args_list)
-        self.assertIn("收到聊天请求", logs)
-        self.assertIn("聊天完成", logs)
-        self.assertNotIn("private message", logs)
-        self.assertEqual(websocket.messages[-1]["type"], "chat.complete")
+    def test_syncs_and_permanently_deletes_conversation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "conversations.json"
+            sessions = root / "sessions"
+            workspace = root / "workspace"
+            sessions.mkdir()
+            workspace.mkdir()
+            agent = PiRpcAgent("pi", sessions, workspace)
+            conversation = {
+                "id": "conversation-1",
+                "title": "测试会话",
+                "deviceId": "device-1",
+                "updatedAt": "2026-08-26T10:00:00Z",
+                "messages": [{
+                    "id": "user-1",
+                    "role": "user",
+                    "text": "你好",
+                    "createdAt": "2026-08-26T10:00:00Z",
+                }],
+            }
+            self.assertEqual(
+                sync_conversations(state, [conversation], "device-1")[0]["id"],
+                "conversation-1",
+            )
+            updated = {
+                **conversation,
+                "title": "更新后的会话",
+                "updatedAt": "2026-08-26T10:01:00Z",
+                "messages": [
+                    *conversation["messages"],
+                    {
+                        "id": "assistant-1",
+                        "role": "assistant",
+                        "text": "你好",
+                        "createdAt": "2026-08-26T10:01:00Z",
+                    },
+                ],
+            }
+            merged = sync_conversations(state, [updated], "device-1")[0]
+            self.assertEqual(merged["title"], "更新后的会话")
+            self.assertEqual(len(merged["messages"]), 2)
+            session_id = agent.session_id("conversation-1")
+            session_file = sessions / f"{session_id}.jsonl"
+            session_file.write_text("session", encoding="utf-8")
+            upload_dir = workspace / ".clawpi" / "attachments" / session_id
+            upload_dir.mkdir(parents=True)
+            (upload_dir / "notes.txt").write_text("private", encoding="utf-8")
+
+            delete_conversation(state, "conversation-1", agent)
+
+            self.assertEqual(conversation_list(state), [])
+            self.assertFalse(session_file.exists())
+            self.assertFalse(upload_dir.exists())
+            self.assertEqual(sync_conversations(state, [conversation], "device-1"), [])
 
     def test_streams_tool_status_and_resumes_after_user_selection(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

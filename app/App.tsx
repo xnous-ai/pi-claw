@@ -27,7 +27,9 @@ import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import {
   configureDeviceAgent,
   configureDeviceNetwork,
+  deleteDeviceConversation,
   getDevice,
+  getDeviceConversations,
   getDevices,
   getDeviceAgentConfig,
   getDeviceCommands,
@@ -43,6 +45,7 @@ import {
   removeDeviceCapability,
   scanHostWifiNetworks,
   streamAgentMessage,
+  syncDeviceConversations,
   AgentCancelledError,
   type AgentCommand,
   type AgentInteraction,
@@ -195,6 +198,39 @@ async function openGeneratedAttachment(attachment: ChatAttachment) {
   }
 }
 
+async function syncConversationsFromHosts(
+  session: AuthSession,
+  localConversations: Conversation[],
+): Promise<Conversation[]> {
+  const groups = await Promise.all(session.devices.map(async (device) => {
+    const local = localConversations.filter((item) => item.deviceId === device.id);
+    if (device.status !== 'online') return local;
+    try {
+      return local.length
+        ? await syncDeviceConversations(session.token, device.id, local)
+        : await getDeviceConversations(session.token, device.id);
+    } catch {
+      return local;
+    }
+  }));
+  return groups.flat().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+function removeConversationFiles(conversation: Conversation) {
+  const generatedDirectory = new Directory(Paths.document, 'agent-files').uri;
+  for (const message of conversation.messages) {
+    for (const attachment of message.attachments ?? []) {
+      if (!attachment.uri?.startsWith(generatedDirectory)) continue;
+      try {
+        const file = new File(attachment.uri);
+        if (file.exists) file.delete();
+      } catch {
+        // The conversation can still be deleted if Android already removed the cached file.
+      }
+    }
+  }
+}
+
 function createWelcomeMessage(): AgentMessage {
   return {
     id: `welcome-${Date.now()}`,
@@ -248,11 +284,13 @@ function IconButton({
   label,
   onPress,
   disabled = false,
+  color = colors.accent,
 }: {
   icon: AndroidSymbol;
   label: string;
   onPress: () => void;
   disabled?: boolean;
+  color?: string;
 }) {
   return (
     <Pressable
@@ -262,7 +300,7 @@ function IconButton({
       onPress={onPress}
       style={({ pressed }) => [styles.iconButton, disabled && styles.buttonDisabled, pressed && styles.pressed]}
     >
-      <Icon color={colors.accent} name={icon} />
+      <Icon color={color} name={icon} />
     </Pressable>
   );
 }
@@ -894,11 +932,13 @@ function DeviceFilter({
 function ConversationListScreen({
   devices,
   conversations,
+  onDelete,
   onOpen,
   onCreate,
 }: {
   devices: Device[];
   conversations: Conversation[];
+  onDelete: (conversationId: string) => Promise<void>;
   onOpen: (conversationId: string) => void;
   onCreate: (deviceId: string) => void;
 }) {
@@ -907,6 +947,23 @@ function ConversationListScreen({
   const visible = conversations
     .filter((conversation) => conversation.deviceId === selectedDevice.id)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+
+  function confirmDelete(conversation: Conversation) {
+    Alert.alert('删除这个会话？', `“${conversation.title}”的聊天记录和主机端 Pi session 将被永久删除。`, [
+      { text: '取消', style: 'cancel' },
+      {
+        text: '删除',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            await onDelete(conversation.id);
+          } catch (deleteError) {
+            Alert.alert('无法删除会话', errorMessage(deleteError));
+          }
+        },
+      },
+    ]);
+  }
 
   return (
     <View style={styles.fullPage}>
@@ -922,26 +979,37 @@ function ConversationListScreen({
             {visible.map((conversation, index) => {
               const lastMessage = conversation.messages.at(-1);
               return (
-                <Pressable
-                  accessibilityRole="button"
+                <View
                   key={conversation.id}
-                  onPress={() => onOpen(conversation.id)}
-                  style={({ pressed }) => [
+                  style={[
                     styles.conversationRow,
                     index < visible.length - 1 && styles.rowDivider,
-                    pressed && styles.rowPressed,
                   ]}
                 >
-                  <View style={styles.conversationIcon}><Icon color={colors.accent} name="forum" /></View>
-                  <View style={styles.conversationCopy}>
-                    <View style={styles.conversationTitleRow}>
-                      <Text numberOfLines={1} style={styles.rowTitle}>{conversation.title}</Text>
-                      <Text style={styles.rowTime}>{formatTime(conversation.updatedAt)}</Text>
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={() => onOpen(conversation.id)}
+                    style={({ pressed }) => [styles.conversationOpen, pressed && styles.rowPressed]}
+                  >
+                    <View style={styles.conversationIcon}><Icon color={colors.accent} name="forum" /></View>
+                    <View style={styles.conversationCopy}>
+                      <View style={styles.conversationTitleRow}>
+                        <Text numberOfLines={1} style={styles.rowTitle}>{conversation.title}</Text>
+                        <Text style={styles.rowTime}>{formatTime(conversation.updatedAt)}</Text>
+                      </View>
+                      <Text numberOfLines={2} style={styles.rowPreview}>{lastMessage?.text ?? '暂无消息'}</Text>
                     </View>
-                    <Text numberOfLines={2} style={styles.rowPreview}>{lastMessage?.text ?? '暂无消息'}</Text>
+                    <Icon color={colors.subtle} name="chevron_right" size={20} />
+                  </Pressable>
+                  <View style={styles.conversationDelete}>
+                    <IconButton
+                      color={colors.danger}
+                      icon="delete"
+                      label={`删除会话 ${conversation.title}`}
+                      onPress={() => confirmDelete(conversation)}
+                    />
                   </View>
-                  <Icon color={colors.subtle} name="chevron_right" size={20} />
-                </Pressable>
+                </View>
               );
             })}
           </View>
@@ -2051,6 +2119,7 @@ function MainScreen({
   onAddDevice,
   onCancel,
   onCreateConversation,
+  onDeleteConversation,
   onConfigureDevice,
   onInstallCapability,
   onLoadCapabilities,
@@ -2069,6 +2138,7 @@ function MainScreen({
   onAddDevice: (device: Device) => Promise<void>;
   onCancel: () => void;
   onCreateConversation: (deviceId: string) => Promise<Conversation>;
+  onDeleteConversation: (conversationId: string) => Promise<void>;
   onConfigureDevice: (deviceId: string, provider: AgentProvider, apiKey: string | undefined, model: string) => Promise<AgentConfiguration>;
   onInstallCapability: (deviceId: string, capabilityId: string) => Promise<void>;
   onLoadCapabilities: (deviceId: string) => Promise<DeviceCapability[]>;
@@ -2204,6 +2274,7 @@ function MainScreen({
         conversations={conversations}
         devices={session.devices}
         onCreate={createConversation}
+        onDelete={onDeleteConversation}
         onOpen={(conversationId) => setRoute({ name: 'chat', conversationId })}
       />
     ) : tab === 'devices' ? (
@@ -2254,10 +2325,13 @@ function AppContent() {
             const deviceIds = new Set(devices.map((device) => device.id));
             const activeConversations = storedConversations.filter((item) => deviceIds.has(item.deviceId));
             storedSession = { ...storedSession, devices };
-            storedConversations = activeConversations;
+            storedConversations = await syncConversationsFromHosts(
+              storedSession,
+              activeConversations,
+            );
             await Promise.all([
               saveSession(storedSession),
-              saveConversations(activeConversations),
+              saveConversations(storedConversations),
             ]);
           } catch {
             // Keep the local cache available when the phone starts offline.
@@ -2317,10 +2391,27 @@ function AppContent() {
     const merged = current
       ? { ...current, ...refreshed, name: current.name, systemStatus }
       : { ...refreshed, systemStatus };
-    await updateSession({
+    const nextSession = {
       ...session,
       devices: session.devices.map((device) => device.id === deviceId ? merged : device),
-    });
+    };
+    await updateSession(nextSession);
+    if (merged.status === 'online') {
+      const local = conversations.filter((item) => item.deviceId === deviceId);
+      try {
+        const remote = local.length
+          ? await syncDeviceConversations(session.token, deviceId, local)
+          : await getDeviceConversations(session.token, deviceId);
+        const nextConversations = [
+          ...conversations.filter((item) => item.deviceId !== deviceId),
+          ...remote,
+        ].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+        setConversations(nextConversations);
+        await saveConversations(nextConversations);
+      } catch {
+        // Device metrics can refresh even when conversation sync is temporarily unavailable.
+      }
+    }
   }
 
   async function configureAgent(
@@ -2413,7 +2504,22 @@ function AppContent() {
     const next = [conversation, ...conversations];
     setConversations(next);
     await saveConversations(next);
+    if (session?.devices.find((device) => device.id === deviceId)?.status === 'online') {
+      syncDeviceConversations(session.token, deviceId, [conversation]).catch(() => undefined);
+    }
     return conversation;
+  }
+
+  async function deleteConversation(conversationId: string) {
+    if (!session) throw new Error('登录状态已失效');
+    if (sending) throw new Error('请先停止正在运行的任务');
+    const conversation = conversations.find((item) => item.id === conversationId);
+    if (!conversation) return;
+    await deleteDeviceConversation(session.token, conversation.deviceId, conversation.id);
+    removeConversationFiles(conversation);
+    const next = conversations.filter((item) => item.id !== conversationId);
+    setConversations(next);
+    await saveConversations(next);
   }
 
   function respondToInteraction(
@@ -2486,6 +2592,9 @@ function AppContent() {
           conversationId,
           text,
           attachments,
+          title,
+          userMessage.id,
+          userMessage.createdAt,
           {
             onDelta: (delta) => {
               assistantMessage = { ...assistantMessage, text: assistantMessage.text + delta };
@@ -2618,6 +2727,7 @@ function AppContent() {
       onCancel={cancelMessage}
       onConfigureDevice={configureAgent}
       onCreateConversation={createConversation}
+      onDeleteConversation={deleteConversation}
       onInstallCapability={installCapability}
       onLoadCapabilities={loadCapabilities}
       onLoadCommands={loadCommands}
@@ -2745,7 +2855,9 @@ const styles = StyleSheet.create({
   offlineText: { color: colors.subtle, fontSize: 12 },
   listContent: { flexGrow: 1, padding: 16, paddingBottom: 32 },
   listSurface: { backgroundColor: colors.surface, borderColor: colors.line, borderRadius: 8, borderWidth: 1, overflow: 'hidden' },
-  conversationRow: { alignItems: 'center', flexDirection: 'row', minHeight: 88, paddingHorizontal: 14, paddingVertical: 12 },
+  conversationRow: { alignItems: 'center', flexDirection: 'row', minHeight: 88 },
+  conversationOpen: { alignItems: 'center', flex: 1, flexDirection: 'row', minHeight: 88, paddingBottom: 12, paddingLeft: 14, paddingTop: 12 },
+  conversationDelete: { marginRight: 2 },
   rowDivider: { borderBottomColor: colors.line, borderBottomWidth: StyleSheet.hairlineWidth },
   conversationIcon: { alignItems: 'center', backgroundColor: colors.accentSoft, borderRadius: 8, height: 44, justifyContent: 'center', marginRight: 12, width: 44 },
   conversationCopy: { flex: 1, marginRight: 8, minWidth: 0 },

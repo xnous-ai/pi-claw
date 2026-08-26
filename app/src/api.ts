@@ -520,6 +520,50 @@ export async function getDevices(token: string): Promise<Device[]> {
   return request<Device[]>('/v1/devices', { method: 'GET' }, token);
 }
 
+export async function getDeviceConversations(
+  token: string,
+  deviceId: string,
+): Promise<Conversation[]> {
+  if (isDemoMode) return [];
+  return request<Conversation[]>(
+    `/v1/devices/${encodeURIComponent(deviceId)}/conversations`,
+    { method: 'GET' },
+    token,
+    30_000,
+  );
+}
+
+export async function syncDeviceConversations(
+  token: string,
+  deviceId: string,
+  conversations: Conversation[],
+): Promise<Conversation[]> {
+  if (isDemoMode) return conversations;
+  return request<Conversation[]>(
+    `/v1/devices/${encodeURIComponent(deviceId)}/conversations`,
+    {
+      method: 'PUT',
+      body: JSON.stringify({ conversations }),
+    },
+    token,
+    30_000,
+  );
+}
+
+export async function deleteDeviceConversation(
+  token: string,
+  deviceId: string,
+  conversationId: string,
+): Promise<void> {
+  if (isDemoMode) return;
+  await request(
+    `/v1/devices/${encodeURIComponent(deviceId)}/conversations/${encodeURIComponent(conversationId)}`,
+    { method: 'DELETE' },
+    token,
+    30_000,
+  );
+}
+
 export async function getDeviceSystemStatus(
   token: string,
   deviceId: string,
@@ -662,6 +706,9 @@ export async function streamAgentMessage(
   conversationId: string,
   text: string,
   attachments: ChatAttachmentUpload[],
+  conversationTitle: string,
+  clientMessageId: string,
+  createdAt: string,
   handlers: AgentStreamHandlers,
   signal?: AbortSignal,
 ): Promise<AgentStreamMessage> {
@@ -681,7 +728,6 @@ export async function streamAgentMessage(
   const websocketUrl = `${API_URL!.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:')}/v1/chat/ws`;
   return new Promise<AgentStreamMessage>((resolve, reject) => {
     const socket = new WebSocket(websocketUrl);
-    const clientMessageId = `client-${Date.now()}`;
     let accumulated = '';
     let settled = false;
     let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
@@ -743,6 +789,8 @@ export async function streamAgentMessage(
           clientMessageId,
           deviceId,
           conversationId,
+          conversationTitle,
+          createdAt,
           text,
           attachments,
         }));

@@ -143,6 +143,9 @@ class ChatAttachmentInput(BaseModel):
 
 class MessageInput(BaseModel):
     conversationId: str = Field(min_length=1, max_length=128)
+    conversationTitle: str = Field(default="新会话", max_length=80)
+    clientMessageId: str = Field(default="", max_length=128)
+    createdAt: str = Field(default="", max_length=64)
     text: str = Field(default="", max_length=32_000)
     attachments: list[ChatAttachmentInput] = Field(default_factory=list, max_length=3)
 
@@ -153,6 +156,34 @@ class MessageInput(BaseModel):
         if sum(item.size for item in self.attachments) > MAX_ATTACHMENTS_BYTES:
             raise ValueError("附件总大小不能超过 6 MB")
         return self
+
+
+class ConversationAttachmentInput(BaseModel):
+    id: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=200)
+    mimeType: str = Field(default="application/octet-stream", max_length=200)
+    size: int = Field(gt=0, le=MAX_ATTACHMENT_BYTES)
+
+
+class ConversationMessageInput(BaseModel):
+    id: str = Field(min_length=1, max_length=128)
+    role: Literal["user", "assistant"]
+    text: str = Field(default="", max_length=100_000)
+    createdAt: str = Field(min_length=1, max_length=64)
+    attachments: list[ConversationAttachmentInput] = Field(default_factory=list, max_length=3)
+    error: str | None = Field(default=None, max_length=1000)
+
+
+class ConversationInput(BaseModel):
+    id: str = Field(min_length=1, max_length=128)
+    title: str = Field(min_length=1, max_length=80)
+    deviceId: str = Field(default="", max_length=128)
+    updatedAt: str = Field(min_length=1, max_length=64)
+    messages: list[ConversationMessageInput] = Field(default_factory=list, max_length=100)
+
+
+class ConversationSyncInput(BaseModel):
+    conversations: list[ConversationInput] = Field(default_factory=list, max_length=50)
 
 
 class AgentConfigInput(BaseModel):
@@ -713,6 +744,74 @@ async def release_device(
     await relay.drop(device.id)
 
 
+async def conversation_request(
+    device_id: str,
+    action: str,
+    data: dict | None = None,
+) -> dict:
+    if not relay.is_online(device_id):
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "主机当前离线")
+    try:
+        return await relay.conversations(device_id, action, data)
+    except HostOffline:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "主机连接已断开")
+    except TimeoutError:
+        raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, "主机会话响应超时")
+    except RuntimeError as error:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(error))
+
+
+@app.get("/v1/devices/{device_id}/conversations")
+async def get_device_conversations(
+    device_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    device = owned_device(device_id, user, db)
+    result = await conversation_request(device.id, "list")
+    return result.get("conversations", [])
+
+
+@app.put("/v1/devices/{device_id}/conversations")
+async def sync_device_conversations(
+    device_id: str,
+    payload: ConversationSyncInput,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    device = owned_device(device_id, user, db)
+    conversations = [
+        {**item.model_dump(), "deviceId": device.id}
+        for item in payload.conversations
+    ]
+    result = await conversation_request(
+        device.id,
+        "sync",
+        {"conversations": conversations},
+    )
+    return result.get("conversations", [])
+
+
+@app.delete(
+    "/v1/devices/{device_id}/conversations/{conversation_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_device_conversation(
+    device_id: str,
+    conversation_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> None:
+    if not conversation_id or len(conversation_id) > 128:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "会话 ID 无效")
+    device = owned_device(device_id, user, db)
+    await conversation_request(
+        device.id,
+        "delete",
+        {"conversationId": conversation_id},
+    )
+
+
 @app.post("/v1/devices/{device_id}/messages")
 async def send_message(
     device_id: str,
@@ -729,6 +828,9 @@ async def send_message(
             payload.conversationId,
             payload.text,
             [item.model_dump() for item in payload.attachments],
+            payload.conversationTitle,
+            payload.clientMessageId,
+            payload.createdAt,
         )
     except HostOffline:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "主机连接已断开")
@@ -825,6 +927,9 @@ async def user_chat_websocket(websocket: WebSocket) -> None:
                         message.text,
                         [item.model_dump() for item in message.attachments],
                         stream=True,
+                        conversation_title=message.conversationTitle,
+                        client_message_id=message.clientMessageId,
+                        created_at=message.createdAt,
                     )
                 except HostOffline:
                     await send({"type": "chat.error", "message": "主机连接已断开"})

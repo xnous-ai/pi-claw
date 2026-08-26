@@ -105,6 +105,9 @@ class Relay:
         text: str,
         attachments: list[dict] | None = None,
         stream: bool = False,
+        conversation_title: str = "",
+        client_message_id: str = "",
+        created_at: str = "",
     ) -> tuple[HostConnection, str, PendingRequest]:
         connection = self._hosts.get(device_id)
         if not connection:
@@ -121,7 +124,11 @@ class Relay:
                     {
                         "type": "chat.request",
                         "requestId": request_id,
+                        "deviceId": device_id,
                         "conversationId": conversation_id,
+                        "conversationTitle": conversation_title,
+                        "clientMessageId": client_message_id,
+                        "createdAt": created_at,
                         "text": text,
                         "attachments": attachments or [],
                     }
@@ -137,9 +144,18 @@ class Relay:
         conversation_id: str,
         text: str,
         attachments: list[dict] | None = None,
+        conversation_title: str = "",
+        client_message_id: str = "",
+        created_at: str = "",
     ) -> dict:
         connection, request_id, pending = await self.start_chat(
-            device_id, conversation_id, text, attachments
+            device_id,
+            conversation_id,
+            text,
+            attachments,
+            conversation_title=conversation_title,
+            client_message_id=client_message_id,
+            created_at=created_at,
         )
         try:
             return await asyncio.wait_for(pending.future, timeout=90)
@@ -307,6 +323,36 @@ class Relay:
         finally:
             connection.pending.pop(request_id, None)
 
+    async def conversations(
+        self,
+        device_id: str,
+        action: str,
+        data: dict | None = None,
+        timeout: float = 30,
+    ) -> dict:
+        connection = self._hosts.get(device_id)
+        if not connection:
+            raise HostOffline
+        request_id = str(uuid4())
+        pending = PendingRequest(asyncio.get_running_loop().create_future(), kind="conversation")
+        connection.pending[request_id] = pending
+        try:
+            try:
+                async with connection.send_lock:
+                    await connection.websocket.send_json(
+                        {
+                            "type": f"conversation.{action}",
+                            "requestId": request_id,
+                            "deviceId": device_id,
+                            **(data or {}),
+                        }
+                    )
+            except (OSError, RuntimeError) as error:
+                raise HostOffline from error
+            return await asyncio.wait_for(pending.future, timeout=timeout)
+        finally:
+            connection.pending.pop(request_id, None)
+
     async def handle(self, connection: HostConnection, payload: dict) -> None:
         request_id = payload.get("requestId")
         pending = connection.pending.get(request_id)
@@ -375,6 +421,21 @@ class Relay:
                 pending.future.set_result({})
             else:
                 pending.future.set_exception(RuntimeError(message))
+        elif (
+            payload.get("type") == "conversation.result"
+            and pending.kind == "conversation"
+            and not pending.future.done()
+        ):
+            data = payload.get("data")
+            pending.future.set_result(data if isinstance(data, dict) else {})
+        elif (
+            payload.get("type") == "conversation.error"
+            and pending.kind == "conversation"
+            and not pending.future.done()
+        ):
+            pending.future.set_exception(
+                RuntimeError(str(payload.get("message") or "会话操作失败"))
+            )
         elif (
             payload.get("type") == "agent.configured"
             and pending.kind == "agent-config"
