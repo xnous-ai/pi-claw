@@ -1104,12 +1104,14 @@ def clean_conversation(value: object, device_id: str = "") -> dict | None:
     if not conversation_id:
         return None
     messages = []
+    message_ids = set()
     raw_messages = value.get("messages")
     if isinstance(raw_messages, list):
         for item in raw_messages[-100:]:
             message = clean_conversation_message(item)
-            if message:
+            if message and message["id"] not in message_ids:
                 messages.append(message)
+                message_ids.add(message["id"])
     return {
         "id": conversation_id,
         "title": (str(value.get("title") or "新会话").strip() or "新会话")[:80],
@@ -1223,7 +1225,13 @@ def record_conversation_messages(
         if conversation is None:
             raise ValueError("会话信息无效")
         state["conversations"].append(conversation)
-    cleaned_messages = [clean_conversation_message(item) for item in messages]
+    message_ids = {item["id"] for item in conversation["messages"]}
+    cleaned_messages = []
+    for item in messages:
+        message = clean_conversation_message(item)
+        if message and message["id"] not in message_ids:
+            cleaned_messages.append(message)
+            message_ids.add(message["id"])
     conversation["messages"] = (
         conversation["messages"] + [item for item in cleaned_messages if item]
     )[-100:]

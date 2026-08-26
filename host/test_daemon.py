@@ -327,10 +327,10 @@ class PiRpcAgentTest(unittest.TestCase):
                     "createdAt": "2026-08-26T10:00:00Z",
                 }],
             }
-            self.assertEqual(
-                sync_conversations(state, [conversation], "device-1")[0]["id"],
-                "conversation-1",
-            )
+            conversation["messages"].append(dict(conversation["messages"][0]))
+            synced = sync_conversations(state, [conversation], "device-1")[0]
+            self.assertEqual(synced["id"], "conversation-1")
+            self.assertEqual(len(synced["messages"]), 1)
             updated = {
                 **conversation,
                 "title": "更新后的会话",

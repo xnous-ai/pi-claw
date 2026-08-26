@@ -87,6 +87,13 @@ type Route =
   | { name: 'add-device' }
   | { name: 'profile-detail'; page: ProfilePage };
 
+let localIdSequence = 0;
+
+function createLocalId(prefix: string) {
+  localIdSequence += 1;
+  return `${prefix}-${Date.now()}-${localIdSequence.toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 const colors = {
   ink: '#101828',
   muted: '#596579',
@@ -233,7 +240,7 @@ function removeConversationFiles(conversation: Conversation) {
 
 function createWelcomeMessage(): AgentMessage {
   return {
-    id: `welcome-${Date.now()}`,
+    id: createLocalId('welcome'),
     role: 'assistant',
     text: '你好，我是这台主机上的 Pi agent。告诉我你想完成什么。',
     createdAt: new Date().toISOString(),
@@ -2495,7 +2502,7 @@ function AppContent() {
   async function createConversation(deviceId: string) {
     const now = new Date().toISOString();
     const conversation: Conversation = {
-      id: `conversation-${Date.now()}`,
+      id: createLocalId('conversation'),
       title: '新会话',
       deviceId,
       updatedAt: now,
@@ -2548,7 +2555,7 @@ function AppContent() {
     if (!original) return;
     const originalMessages = original.messages;
     const userMessage: AgentMessage = {
-      id: `user-${Date.now()}`,
+      id: createLocalId('user'),
       role: 'user',
       text,
       createdAt: new Date().toISOString(),
@@ -2557,7 +2564,7 @@ function AppContent() {
     const titleSource = text.trim() || attachments[0]?.name || '附件';
     const title = original.title === '新会话' ? titleSource.slice(0, 22) : original.title;
     let assistantMessage: AgentMessage = {
-      id: `assistant-pending-${Date.now()}`,
+      id: createLocalId('assistant-pending'),
       role: 'assistant',
       text: '',
       createdAt: userMessage.createdAt,

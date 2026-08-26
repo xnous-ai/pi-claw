@@ -1,7 +1,13 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 
-import type { AgentMessage, AuthSession, Conversation, Device } from './api';
+import {
+  normalizeConversations,
+  type AgentMessage,
+  type AuthSession,
+  type Conversation,
+  type Device,
+} from './api';
 
 const TOKEN_KEY = 'clawpi.auth.token';
 const SESSION_KEY = 'clawpi.auth.session';
@@ -51,7 +57,7 @@ export async function loadSession(): Promise<AuthSession | null> {
 }
 
 export async function saveConversations(conversations: Conversation[]) {
-  const trimmed = conversations.slice(0, 50).map((conversation) => ({
+  const trimmed = normalizeConversations(conversations).slice(0, 50).map((conversation) => ({
     ...conversation,
     messages: conversation.messages.slice(-100),
   }));
@@ -67,9 +73,7 @@ export async function loadConversations(fallbackDeviceId?: string): Promise<Conv
     try {
       const conversations = JSON.parse(value) as Conversation[];
       if (Array.isArray(conversations)) {
-        return conversations.filter(
-          (conversation) => conversation?.id && conversation.deviceId && conversation.updatedAt,
-        );
+        return normalizeConversations(conversations);
       }
     } catch {
       return [];
@@ -89,7 +93,7 @@ export async function loadConversations(fallbackDeviceId?: string): Promise<Conv
     };
     await saveConversations([migrated]);
     await AsyncStorage.removeItem(MESSAGES_KEY);
-    return [migrated];
+    return normalizeConversations([migrated]);
   } catch {
     return [];
   }

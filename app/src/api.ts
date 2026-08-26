@@ -114,6 +114,29 @@ export type Conversation = {
   messages: AgentMessage[];
 };
 
+export function normalizeConversations(conversations: Conversation[]): Conversation[] {
+  if (!Array.isArray(conversations)) return [];
+  return conversations
+    .filter((conversation) => (
+      !!conversation?.id
+      && !!conversation.deviceId
+      && !!conversation.updatedAt
+      && Array.isArray(conversation.messages)
+    ))
+    .map((conversation) => {
+      const seen = new Set<string>();
+      const messages: AgentMessage[] = [];
+      for (let index = conversation.messages.length - 1; index >= 0; index -= 1) {
+        const message = conversation.messages[index];
+        if (!message?.id || seen.has(message.id)) continue;
+        seen.add(message.id);
+        messages.push(message);
+      }
+      messages.reverse();
+      return { ...conversation, messages };
+    });
+}
+
 export type AgentProvider = string;
 
 export type AgentProviderOption = {
@@ -525,12 +548,13 @@ export async function getDeviceConversations(
   deviceId: string,
 ): Promise<Conversation[]> {
   if (isDemoMode) return [];
-  return request<Conversation[]>(
+  const conversations = await request<Conversation[]>(
     `/v1/devices/${encodeURIComponent(deviceId)}/conversations`,
     { method: 'GET' },
     token,
     30_000,
   );
+  return normalizeConversations(conversations);
 }
 
 export async function syncDeviceConversations(
@@ -538,8 +562,8 @@ export async function syncDeviceConversations(
   deviceId: string,
   conversations: Conversation[],
 ): Promise<Conversation[]> {
-  if (isDemoMode) return conversations;
-  return request<Conversation[]>(
+  if (isDemoMode) return normalizeConversations(conversations);
+  const synced = await request<Conversation[]>(
     `/v1/devices/${encodeURIComponent(deviceId)}/conversations`,
     {
       method: 'PUT',
@@ -548,6 +572,7 @@ export async function syncDeviceConversations(
     token,
     30_000,
   );
+  return normalizeConversations(synced);
 }
 
 export async function deleteDeviceConversation(
