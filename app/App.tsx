@@ -27,6 +27,7 @@ import {
   configureDeviceAgent,
   configureDeviceNetwork,
   getDevice,
+  getDevices,
   getDeviceAgentConfig,
   getDeviceCommands,
   getDeviceCapabilities,
@@ -2153,6 +2154,7 @@ function AppContent() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [sending, setSending] = useState(false);
   const activeChat = useRef<AbortController | null>(null);
+  const releasedDeviceIds = useRef(new Set<string>());
   const interactionResponders = useRef(new Map<string, {
     answer: (label: string) => void;
     respond: (response: InteractionResponse) => void;
@@ -2166,7 +2168,22 @@ function AppContent() {
           await clearSession();
           storedSession = null;
         }
-        const storedConversations = await loadConversations(storedSession?.devices[0]?.id);
+        let storedConversations = await loadConversations(storedSession?.devices[0]?.id);
+        if (storedSession && !isDemoMode) {
+          try {
+            const devices = await getDevices(storedSession.token);
+            const deviceIds = new Set(devices.map((device) => device.id));
+            const activeConversations = storedConversations.filter((item) => deviceIds.has(item.deviceId));
+            storedSession = { ...storedSession, devices };
+            storedConversations = activeConversations;
+            await Promise.all([
+              saveSession(storedSession),
+              saveConversations(activeConversations),
+            ]);
+          } catch {
+            // Keep the local cache available when the phone starts offline.
+          }
+        }
         setSession(storedSession);
         setConversations(storedConversations);
       } catch {
@@ -2191,6 +2208,7 @@ function AppContent() {
 
   async function addDevice(device: Device) {
     if (!session) return;
+    releasedDeviceIds.current.delete(device.id);
     await updateSession({ ...session, devices: [...session.devices, device] });
   }
 
@@ -2200,6 +2218,7 @@ function AppContent() {
       getDevice(session.token, deviceId),
       getDeviceSystemStatus(session.token, deviceId).catch(() => undefined),
     ]);
+    if (releasedDeviceIds.current.has(deviceId)) return;
     const current = session.devices.find((device) => device.id === deviceId);
     const systemStatus: DeviceSystemStatus | undefined = systemResult ?? (
       refreshed.status === 'offline'
@@ -2283,13 +2302,24 @@ function AppContent() {
 
   async function unbindDevice(deviceId: string) {
     if (!session) return;
-    await releaseDevice(session.token, deviceId);
+    releasedDeviceIds.current.add(deviceId);
+    try {
+      await releaseDevice(session.token, deviceId);
+    } catch (error) {
+      releasedDeviceIds.current.delete(deviceId);
+      throw error;
+    }
+    const nextSession = {
+      ...session,
+      devices: session.devices.filter((device) => device.id !== deviceId),
+    };
     const nextConversations = conversations.filter((item) => item.deviceId !== deviceId);
+    setSession(nextSession);
+    setConversations(nextConversations);
     await Promise.all([
-      updateSession({ ...session, devices: session.devices.filter((device) => device.id !== deviceId) }),
+      saveSession(nextSession),
       saveConversations(nextConversations),
     ]);
-    setConversations(nextConversations);
   }
 
   async function createConversation(deviceId: string) {

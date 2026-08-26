@@ -503,6 +503,14 @@ export async function getDevice(token: string, deviceId: string): Promise<Device
   return request<Device>(`/v1/devices/${encodeURIComponent(deviceId)}`, { method: 'GET' }, token);
 }
 
+export async function getDevices(token: string): Promise<Device[]> {
+  if (isDemoMode) {
+    await delay(300);
+    return [];
+  }
+  return request<Device[]>('/v1/devices', { method: 'GET' }, token);
+}
+
 export async function getDeviceSystemStatus(
   token: string,
   deviceId: string,
