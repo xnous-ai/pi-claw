@@ -1316,7 +1316,6 @@ function DeviceDetailScreen({
   onBack,
   onCapabilities,
   onConfigure,
-  onLoadCapabilities,
   onRefresh,
   onRelease,
 }: {
@@ -1325,50 +1324,19 @@ function DeviceDetailScreen({
   onBack: () => void;
   onCapabilities: () => void;
   onConfigure: () => void;
-  onLoadCapabilities: () => Promise<DeviceCapability[]>;
   onRefresh: () => Promise<void>;
   onRelease: () => void;
 }) {
-  const [capabilities, setCapabilities] = useState<DeviceCapability[]>([]);
-  const [capabilityLoading, setCapabilityLoading] = useState(true);
-  const [capabilityError, setCapabilityError] = useState(false);
   const status = device.systemStatus;
-
-  async function loadCapabilities() {
-    setCapabilityLoading(true);
-    setCapabilityError(false);
-    try {
-      setCapabilities((await onLoadCapabilities()).filter((item) => item.installed));
-    } catch {
-      setCapabilityError(true);
-    } finally {
-      setCapabilityLoading(false);
-    }
-  }
 
   useEffect(() => {
     void onRefresh();
-    void loadCapabilities();
   }, [device.id]);
-
-  function capabilitySummary(kind: DeviceCapability['kind']) {
-    if (device.status !== 'online') return '主机离线';
-    if (capabilityLoading) return '读取中';
-    if (capabilityError) return '读取失败';
-    const items = capabilities.filter((item) => item.kind === kind);
-    return items.length
-      ? items.map((item) => `${item.name}${item.local ? '（本地）' : ''}`).join('、')
-      : '未发现';
-  }
-
-  async function refreshDetails() {
-    await Promise.all([onRefresh(), loadCapabilities()]);
-  }
 
   return (
     <View style={styles.fullPage}>
       <PageHeader
-        action={<IconButton disabled={refreshing} icon="refresh" label="刷新状态" onPress={refreshDetails} />}
+        action={<IconButton disabled={refreshing} icon="refresh" label="刷新状态" onPress={onRefresh} />}
         onBack={onBack}
         subtitle={device.status === 'online' ? '在线并可访问' : '当前离线'}
         title={device.name}
@@ -1410,11 +1378,6 @@ function DeviceDetailScreen({
             label="硬盘"
             percent={device.status === 'online' ? status?.diskPercent ?? null : null}
           />
-        </View>
-        <Text style={styles.listSectionTitle}>本机能力</Text>
-        <View style={styles.detailSurface}>
-          <DetailRow label="Skill" value={capabilitySummary('skill')} />
-          <DetailRow label="插件" value={capabilitySummary('extension')} />
         </View>
         <Text style={styles.listSectionTitle}>Agent</Text>
         <View style={styles.listSurface}>
@@ -1967,7 +1930,6 @@ function MainScreen({
         onBack={() => setRoute({ name: 'root' })}
         onCapabilities={() => setRoute({ name: 'capabilities', deviceId: device.id })}
         onConfigure={() => setRoute({ name: 'agent-config', deviceId: device.id })}
-        onLoadCapabilities={() => onLoadCapabilities(device.id)}
         onRefresh={async () => {
           setRefreshing(true);
           try {
