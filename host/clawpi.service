@@ -6,24 +6,14 @@ Wants=NetworkManager.service network-online.target
 [Service]
 Type=simple
 User=root
-Group=clawpi
+Group=root
 EnvironmentFile=/etc/clawpi/clawpi.env
 WorkingDirectory=/var/lib/clawpi/workspace
 ExecStart=/opt/clawpi/venv/bin/python -u /opt/clawpi/daemon.py
 Restart=always
 RestartSec=5
 TimeoutStopSec=15
-UMask=0077
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectHome=true
-ProtectSystem=strict
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
-ReadWritePaths=/var/lib/clawpi
-CapabilityBoundingSet=CAP_SETGID CAP_SETUID
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+UMask=0022
 
 [Install]
 WantedBy=multi-user.target

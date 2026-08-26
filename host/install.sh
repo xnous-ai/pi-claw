@@ -37,28 +37,39 @@ node -e 'const [major, minor] = process.versions.node.split(".").map(Number); pr
     exit 1
 }
 
-id clawpi >/dev/null 2>&1 || useradd --system --home-dir /var/lib/clawpi --shell /usr/sbin/nologin clawpi
+WAS_ACTIVE=false
+if systemctl is-active --quiet clawpi.service; then
+    WAS_ACTIVE=true
+    systemctl stop clawpi.service
+fi
+
 install -d -m 0755 /opt/clawpi
-install -d -o root -g clawpi -m 0770 /var/lib/clawpi
-install -d -o clawpi -g clawpi -m 0750 /var/lib/clawpi/workspace /var/lib/clawpi/sessions /var/lib/clawpi/pi-config /var/lib/clawpi/pi-config/skills /var/lib/clawpi/pi-config/extensions
+install -d -o root -g root -m 0755 /var/lib/clawpi
+install -d -o root -g root -m 0755 /var/lib/clawpi/workspace /var/lib/clawpi/sessions /var/lib/clawpi/pi-config /var/lib/clawpi/pi-config/skills /var/lib/clawpi/pi-config/extensions
 install -d -m 0750 /etc/clawpi
-chown root:clawpi /var/lib/clawpi
-chmod 0770 /var/lib/clawpi
-chown -R clawpi:clawpi /var/lib/clawpi/workspace /var/lib/clawpi/sessions /var/lib/clawpi/pi-config
-chmod 0750 /var/lib/clawpi/workspace /var/lib/clawpi/sessions /var/lib/clawpi/pi-config
+chown -R root:root /var/lib/clawpi
+chmod 0755 /var/lib/clawpi /var/lib/clawpi/workspace /var/lib/clawpi/sessions /var/lib/clawpi/pi-config
 if [ -f /var/lib/clawpi/credentials.json ]; then
-    chown root:clawpi /var/lib/clawpi/credentials.json
+    chown root:root /var/lib/clawpi/credentials.json
     chmod 0600 /var/lib/clawpi/credentials.json
 fi
 if [ -f /var/lib/clawpi/agent.json ]; then
-    chown clawpi:clawpi /var/lib/clawpi/agent.json
-    chmod 0660 /var/lib/clawpi/agent.json
+    chown root:root /var/lib/clawpi/agent.json
+    chmod 0600 /var/lib/clawpi/agent.json
+fi
+if getent passwd clawpi >/dev/null 2>&1; then
+    CLAWPI_ACCOUNT=$(getent passwd clawpi)
+    CLAWPI_HOME=$(printf '%s' "$CLAWPI_ACCOUNT" | cut -d: -f6)
+    CLAWPI_SHELL=$(printf '%s' "$CLAWPI_ACCOUNT" | cut -d: -f7)
+    if [ "$CLAWPI_HOME" = "/var/lib/clawpi" ] && [ "$CLAWPI_SHELL" = "/usr/sbin/nologin" ]; then
+        userdel clawpi
+    fi
 fi
 
 install -m 0644 "$SCRIPT_DIR/daemon.py" /opt/clawpi/daemon.py
 install -m 0644 "$SCRIPT_DIR/simulator.py" /opt/clawpi/simulator.py
 install -m 0644 "$SCRIPT_DIR/requirements.txt" /opt/clawpi/requirements.txt
-install -o clawpi -g clawpi -m 0644 "$SCRIPT_DIR/clawpi-interaction.ts" /var/lib/clawpi/pi-config/extensions/clawpi-interaction.ts
+install -o root -g root -m 0644 "$SCRIPT_DIR/clawpi-interaction.ts" /var/lib/clawpi/pi-config/extensions/clawpi-interaction.ts
 python3 -m venv --clear /opt/clawpi/venv
 /opt/clawpi/venv/bin/pip install --disable-pip-version-check --no-cache-dir -r /opt/clawpi/requirements.txt
 npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@$PI_VERSION"
@@ -70,4 +81,9 @@ install -m 0644 "$SCRIPT_DIR/clawpi.service" /etc/systemd/system/clawpi.service
 systemctl daemon-reload
 systemctl enable clawpi.service
 
-echo "安装完成。编辑 /etc/clawpi/clawpi.env 后运行：systemctl start clawpi"
+if [ "$WAS_ACTIVE" = true ]; then
+    systemctl start clawpi.service
+    echo "更新完成，ClawPi 服务已重新启动"
+else
+    echo "安装完成。编辑 /etc/clawpi/clawpi.env 后运行：systemctl start clawpi"
+fi

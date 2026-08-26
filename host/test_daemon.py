@@ -454,11 +454,17 @@ class ProvisioningTest(unittest.TestCase):
         self.assertEqual(len(rescans), 2)
         self.assertEqual(len(connects), 2)
 
-    def test_install_allows_service_to_save_credentials(self) -> None:
+    def test_install_migrates_host_state_to_root(self) -> None:
         script = Path(__file__).with_name("install.sh").read_text(encoding="utf-8")
-        self.assertIn("install -d -o root -g clawpi -m 0770 /var/lib/clawpi", script)
-        self.assertIn("chown root:clawpi /var/lib/clawpi", script)
-        self.assertIn("chmod 0660 /var/lib/clawpi/agent.json", script)
+        service = Path(__file__).with_name("clawpi.service").read_text(encoding="utf-8")
+        self.assertIn("install -d -o root -g root -m 0755 /var/lib/clawpi", script)
+        self.assertIn("chown -R root:root /var/lib/clawpi", script)
+        self.assertIn("chmod 0600 /var/lib/clawpi/agent.json", script)
+        self.assertIn("userdel clawpi", script)
+        self.assertNotIn("useradd", script)
+        self.assertIn("Group=root", service)
+        self.assertNotIn("ProtectSystem", service)
+        self.assertNotIn("CapabilityBoundingSet", service)
 
     def test_allows_only_one_wifi_refresh_at_a_time(self) -> None:
         started = threading.Event()
