@@ -1357,7 +1357,9 @@ def workspace_file_snapshot(workspace: Path) -> dict[str, tuple[int, int]]:
 def collect_generated_attachments(
     workspace: Path,
     before: dict[str, tuple[int, int]],
+    final_text: str,
 ) -> list[dict]:
+    normalized_final_text = final_text.replace("\\", "/")
     changed: list[tuple[int, Path, int]] = []
     for relative_path, (modified_at, size) in workspace_file_snapshot(workspace).items():
         path = workspace / relative_path
@@ -1366,6 +1368,8 @@ def collect_generated_attachments(
         if size <= 0 or size > MAX_ATTACHMENT_BYTES:
             continue
         if before.get(relative_path) == (modified_at, size):
+            continue
+        if path.name not in final_text and relative_path not in normalized_final_text:
             continue
         changed.append((modified_at, path, size))
 
@@ -1468,13 +1472,18 @@ async def handle_chat(
                 )
 
         await asyncio.wait_for(forward_response(), timeout)
-        generated_attachments = collect_generated_attachments(agent.workspace, workspace_before)
+        final_text = "".join(response_parts)
+        generated_attachments = collect_generated_attachments(
+            agent.workspace,
+            workspace_before,
+            final_text,
+        )
         message_id = f"pi-{uuid4()}"
         created_at = utc_timestamp()
         assistant_message = {
             "id": message_id,
             "role": "assistant",
-            "text": "".join(response_parts),
+            "text": final_text,
             "createdAt": created_at,
             "attachments": generated_attachments,
         }

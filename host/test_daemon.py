@@ -205,12 +205,18 @@ class PiRpcAgentTest(unittest.TestCase):
             before = workspace_file_snapshot(workspace)
             report = workspace / "report.xlsx"
             report.write_bytes(b"xlsx-content")
+            draft = workspace / "draft.pdf"
+            draft.write_bytes(b"draft-content")
             (workspace / "script.py").write_text("print('done')", encoding="utf-8")
             internal = workspace / ".clawpi" / "attachments"
             internal.mkdir(parents=True)
             (internal / "upload.txt").write_text("private", encoding="utf-8")
 
-            attachments = collect_generated_attachments(workspace, before)
+            attachments = collect_generated_attachments(
+                workspace,
+                before,
+                "日报已生成，请下载 report.xlsx。",
+            )
 
             self.assertEqual([item["name"] for item in attachments], ["report.xlsx"])
             self.assertEqual(base64.b64decode(attachments[0]["data"]), b"xlsx-content")
@@ -218,6 +224,7 @@ class PiRpcAgentTest(unittest.TestCase):
                 attachments[0]["mimeType"],
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
+            self.assertEqual(collect_generated_attachments(workspace, before, "处理完成。"), [])
 
     def test_does_not_echo_user_message_when_provider_rejects_key(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
