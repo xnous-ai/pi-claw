@@ -561,6 +561,25 @@ class BackendFlowTest(unittest.TestCase):
         self.assertEqual(status, 201)
         self.assertTrue(capability["enabled"])
 
+        mcp_payload = {
+            "id": "test-mcp",
+            "name": "测试 MCP",
+            "kind": "mcp",
+            "description": "通过 Pi 桥接插件连接 MCP Server",
+            "version": "1.0.0",
+            "source": "npm:test-pi-mcp-bridge@1.0.0",
+            "permissions": ["网络访问", "命令执行"],
+            "enabled": True,
+        }
+        status, mcp_capability = http_json(
+            f"{self.base}/v1/admin/capabilities",
+            "POST",
+            mcp_payload,
+            admin_key="test-admin-key",
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(mcp_capability["kind"], "mcp")
+
         status, catalog = http_json(
             f"{self.base}/v1/devices/{device['id']}/capabilities",
             token=token,
@@ -572,6 +591,8 @@ class BackendFlowTest(unittest.TestCase):
         self.assertFalse(local_capability["managed"])
         store_capability = next(item for item in catalog if item["id"] == "test-extension")
         self.assertFalse(store_capability["installed"])
+        mcp_capability = next(item for item in catalog if item["id"] == "test-mcp")
+        self.assertEqual(mcp_capability["kind"], "mcp")
         status, installed = http_json(
             f"{self.base}/v1/devices/{device['id']}/capabilities/test-extension",
             "POST",
@@ -593,7 +614,8 @@ class BackendFlowTest(unittest.TestCase):
             token=token,
         )
         self.assertEqual(status, 200)
-        self.assertEqual(offline_catalog[0]["id"], "test-extension")
+        self.assertIn("test-extension", {item["id"] for item in offline_catalog})
+        self.assertIn("test-mcp", {item["id"] for item in offline_catalog})
 
         status, _ = http_json(
             f"{self.base}/v1/devices/{device['id']}/claim", "DELETE", token=token

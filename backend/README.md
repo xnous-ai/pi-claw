@@ -41,7 +41,7 @@ $env:CLAWPI_DATABASE_URL = "postgresql+psycopg://user:password@127.0.0.1/clawpi"
 
 ## 管理后台
 
-访问 `/admin` 后输入独立的 `CLAWPI_ADMIN_KEY`。后台可搜索和管理手机号账号、停用账号、重置密码、查看或解绑主机，以及发布 Skill/插件。Skill 以包含 `SKILL.md` 的 ZIP 上传；插件来源填写 Pi 支持的 `npm:` 或 `git:` 包地址。只有后台发布的能力才会显示在 App 中。
+访问 `/admin` 后输入独立的 `CLAWPI_ADMIN_KEY`。后台可搜索和管理手机号账号、停用账号、重置密码、查看或解绑主机，以及发布 Skill、插件和 MCP。Skill 以包含 `SKILL.md` 的 ZIP 上传；插件与 MCP 填写 Pi 支持的 `npm:` 或 `git:` 包地址，用户安装后主机会直接从该来源安装。Pi 0.84.2 不原生加载 MCP，因此 MCP 包必须包含兼容 Pi 的桥接插件，不能只是普通 MCP Server。只有后台发布的能力才会显示在 App 中。
 
 旧版本邮箱账号会在服务启动时自动迁移。邮箱用户名如果本身是手机号会直接沿用；其他旧账号会显示为“待设置手机号”，需要管理员在后台补录后才能用手机号重新登录。
 

@@ -130,7 +130,7 @@ export type AgentConfiguration = {
 export type DeviceCapability = {
   id: string;
   name: string;
-  kind: 'skill' | 'extension';
+  kind: 'skill' | 'extension' | 'mcp';
   description: string;
   version: string;
   source: string;

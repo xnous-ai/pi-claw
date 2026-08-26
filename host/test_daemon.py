@@ -581,6 +581,30 @@ class ProvisioningTest(unittest.TestCase):
             self.assertTrue((root / "skills" / "web-search" / "SKILL.md").is_file())
             self.assertEqual(load_capability_state(state)[0]["version"], "1.0.0")
 
+    def test_installs_mcp_bridge_as_pi_extension(self) -> None:
+        capability = {
+            "id": "filesystem-mcp",
+            "name": "Filesystem MCP",
+            "kind": "mcp",
+            "version": "1.0.0",
+            "source": "npm:pi-filesystem-mcp-bridge@1.0.0",
+        }
+        with tempfile.TemporaryDirectory() as directory, patch("daemon.run_pi_package") as install:
+            root = Path(directory)
+            state = root / "capabilities.json"
+            installed = install_capability(
+                capability,
+                "https://cloud.local",
+                "pi",
+                state,
+                root / "skills",
+            )
+
+        install.assert_called_once_with(
+            "pi", "install", "npm:pi-filesystem-mcp-bridge@1.0.0"
+        )
+        self.assertEqual(installed[0]["kind"], "mcp")
+
     def test_rejects_unsafe_skill_archive(self) -> None:
         archive_buffer = io.BytesIO()
         with zipfile.ZipFile(archive_buffer, "w") as archive:

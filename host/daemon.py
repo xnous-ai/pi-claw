@@ -1344,7 +1344,7 @@ def install_skill(capability: dict, server: str, skills_dir: Path) -> None:
 
 def run_pi_package(pi_command: str, action: str, source: str) -> None:
     if not source.startswith(("npm:", "git:", "https://", "http://", "ssh://")):
-        raise ValueError("插件来源只允许 npm 或 Git 地址")
+        raise ValueError("能力来源只允许 npm 或 Git 地址")
     result = subprocess.run(
         [pi_command, action, source],
         check=False,
@@ -1366,6 +1366,8 @@ def install_capability(
 ) -> list[dict]:
     kind = str(capability.get("kind", ""))
     source = str(capability.get("source", ""))
+    if kind not in {"skill", "extension", "mcp"}:
+        raise ValueError("能力类型无效")
     if kind == "skill" and capability.get("artifactPath"):
         install_skill(capability, server, skills_dir)
     elif source:

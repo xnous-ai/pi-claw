@@ -164,7 +164,7 @@ class AgentConfigInput(BaseModel):
 class CapabilityInput(BaseModel):
     id: str = Field(min_length=2, max_length=80, pattern=r"^[a-z0-9][a-z0-9._-]*$")
     name: str = Field(min_length=1, max_length=120)
-    kind: Literal["skill", "extension"]
+    kind: Literal["skill", "extension", "mcp"]
     description: str = Field(default="", max_length=4000)
     version: str = Field(min_length=1, max_length=80)
     source: str = Field(default="", max_length=500)
@@ -270,6 +270,8 @@ def apply_capability_input(capability: Capability, payload: CapabilityInput) -> 
     source = payload.source.strip()
     if payload.kind == "extension" and not source:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "插件必须填写 npm 或 Git 来源")
+    if payload.kind == "mcp" and not source:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "MCP 必须填写 npm 或 Git 来源")
     if source and not source.startswith(("npm:", "git:", "https://", "http://", "ssh://")):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "能力来源只支持 npm 或 Git 地址")
     capability.name = payload.name.strip()

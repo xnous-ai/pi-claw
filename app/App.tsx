@@ -167,6 +167,24 @@ function Icon({ name, color = colors.ink, size = 24 }: { name: AndroidSymbol; co
   );
 }
 
+function capabilityKindLabel(kind: DeviceCapability['kind']) {
+  if (kind === 'skill') return 'Skill';
+  if (kind === 'mcp') return 'MCP';
+  return '插件';
+}
+
+function capabilityKindIcon(kind: DeviceCapability['kind']): AndroidSymbol {
+  if (kind === 'skill') return 'bolt';
+  if (kind === 'mcp') return 'hub';
+  return 'extension';
+}
+
+function capabilityKindColor(kind: DeviceCapability['kind']) {
+  if (kind === 'skill') return colors.accent;
+  if (kind === 'mcp') return colors.warning;
+  return colors.teal;
+}
+
 function IconButton({
   icon,
   label,
@@ -1512,7 +1530,7 @@ function DeviceDetailScreen({
             icon="extension"
             label="能力管理"
             onPress={onCapabilities}
-            value="Skill 与插件"
+            value="Skill、插件与 MCP"
           />
         </View>
         <Pressable accessibilityRole="button" onPress={onRelease} style={({ pressed }) => [styles.dangerAction, pressed && styles.pressed]}>
@@ -1732,7 +1750,7 @@ function CapabilityScreen({
           <View style={styles.emptyState}>
             <View style={styles.emptyIcon}><Icon color={colors.accent} name="extension" size={32} /></View>
             <Text style={styles.emptyTitle}>暂无可用能力</Text>
-            <Text style={styles.emptyText}>管理员发布 Skill 或插件后会显示在这里。</Text>
+            <Text style={styles.emptyText}>管理员发布 Skill、插件或 MCP 后会显示在这里。</Text>
           </View>
         ) : (
           <View style={styles.listSurface}>
@@ -1742,7 +1760,7 @@ function CapabilityScreen({
               return (
                 <View key={capability.id} style={[styles.capabilityRow, index < capabilities.length - 1 && styles.rowDivider]}>
                   <View style={styles.capabilityIcon}>
-                    <Icon color={capability.kind === 'skill' ? colors.accent : colors.teal} name={capability.kind === 'skill' ? 'bolt' : 'extension'} size={23} />
+                    <Icon color={capabilityKindColor(capability.kind)} name={capabilityKindIcon(capability.kind)} size={23} />
                   </View>
                   <View style={styles.capabilityCopy}>
                     <View style={styles.capabilityTitleRow}>
@@ -1752,7 +1770,7 @@ function CapabilityScreen({
                         capability.installed && styles.capabilityStatusInstalled,
                         localOnly && styles.capabilityStatusLocal,
                       ]}>
-                        {localOnly ? '本地' : capability.installed ? '已安装' : capability.kind === 'skill' ? 'Skill' : '插件'}
+                        {localOnly ? '本地' : capability.installed ? '已安装' : capabilityKindLabel(capability.kind)}
                       </Text>
                     </View>
                     {!!capability.description && <Text style={styles.capabilityDescription}>{capability.description}</Text>}
