@@ -52,10 +52,19 @@ export type ChatAttachment = {
   name: string;
   mimeType: string;
   size: number;
+  uri?: string;
 };
 
 export type ChatAttachmentUpload = ChatAttachment & {
   data: string;
+};
+
+export type ChatAttachmentTransfer = ChatAttachment & {
+  data: string;
+};
+
+export type AgentStreamMessage = Omit<AgentMessage, 'attachments'> & {
+  attachments?: ChatAttachmentTransfer[];
 };
 
 export type AgentStep = {
@@ -655,7 +664,7 @@ export async function streamAgentMessage(
   attachments: ChatAttachmentUpload[],
   handlers: AgentStreamHandlers,
   signal?: AbortSignal,
-): Promise<AgentMessage> {
+): Promise<AgentStreamMessage> {
   if (isDemoMode) {
     handlers.onStatus({ id: 'demo', label: '正在整理回复', state: 'running' });
     await delay(350);
@@ -670,7 +679,7 @@ export async function streamAgentMessage(
   }
 
   const websocketUrl = `${API_URL!.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:')}/v1/chat/ws`;
-  return new Promise<AgentMessage>((resolve, reject) => {
+  return new Promise<AgentStreamMessage>((resolve, reject) => {
     const socket = new WebSocket(websocketUrl);
     const clientMessageId = `client-${Date.now()}`;
     let accumulated = '';
@@ -791,7 +800,26 @@ export async function streamAgentMessage(
       } else if (payload.type === 'chat.complete') {
         const message = payload.message || {};
         const finalText = String(message.text || accumulated);
-        if (!message.id || !finalText) {
+        let totalAttachmentSize = 0;
+        const responseAttachments: ChatAttachmentTransfer[] = [];
+        if (Array.isArray(message.attachments)) {
+          for (const item of message.attachments.slice(0, 3)) {
+            const size = Number(item?.size);
+            const name = String(item?.name || '').trim();
+            const data = typeof item?.data === 'string' ? item.data : '';
+            if (!name || !data || !Number.isInteger(size) || size <= 0 || size > 4 * 1024 * 1024) continue;
+            if (totalAttachmentSize + size > 6 * 1024 * 1024) continue;
+            responseAttachments.push({
+              id: String(item.id || `generated-${Date.now()}-${responseAttachments.length}`),
+              name,
+              mimeType: String(item.mimeType || 'application/octet-stream'),
+              size,
+              data,
+            });
+            totalAttachmentSize += size;
+          }
+        }
+        if (!message.id || (!finalText && !responseAttachments.length)) {
           finishWithError('Agent 服务返回了无效消息');
           return;
         }
@@ -802,6 +830,7 @@ export async function streamAgentMessage(
           role: 'assistant',
           text: finalText,
           createdAt: String(message.createdAt || new Date().toISOString()),
+          attachments: responseAttachments,
         });
       } else if (payload.type === 'chat.cancelled') {
         finishCancelled();

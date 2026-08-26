@@ -334,6 +334,13 @@ class BackendFlowTest(unittest.TestCase):
                     "type": "chat.complete",
                     "requestId": stream_request["requestId"],
                     "messageId": "reply-stream-1",
+                    "attachments": [{
+                        "id": "generated-1",
+                        "name": "report.txt",
+                        "mimeType": "text/plain",
+                        "size": 5,
+                        "data": "aGVsbG8=",
+                    }],
                 }))
                 cancelled_request = json.loads(await websocket.recv())
                 self.assertEqual(cancelled_request["type"], "chat.request")
@@ -506,6 +513,8 @@ class BackendFlowTest(unittest.TestCase):
         self.assertEqual(stream_events[1]["text"], "我先查询相关资料")
         self.assertEqual(stream_events[4]["options"], ["继续", "停止"])
         self.assertEqual(stream_events[-1]["message"]["text"], "我需要你选择继续")
+        self.assertEqual(stream_events[-1]["message"]["attachments"][0]["name"], "report.txt")
+        self.assertEqual(stream_events[-1]["message"]["attachments"][0]["data"], "aGVsbG8=")
 
         async def cancelled_chat() -> None:
             async with connect(f"ws://127.0.0.1:{self.port}/v1/chat/ws") as websocket:

@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import hashlib
 import io
 import json
@@ -20,6 +21,7 @@ from daemon import (
     ProvisioningServer,
     apply_agent_config,
     chat_prompt,
+    collect_generated_attachments,
     connect_wifi,
     cpu_usage_percent,
     discover_capabilities,
@@ -43,6 +45,7 @@ from daemon import (
     start_hotspot,
     stop_hotspot,
     wait_for_setup,
+    workspace_file_snapshot,
 )
 
 
@@ -190,6 +193,28 @@ class PiRpcAgentTest(unittest.TestCase):
             prompt = chat_prompt("总结内容", saved)
             self.assertIn(path.name, prompt)
             self.assertIn("总结内容", prompt)
+
+    def test_collects_new_generated_documents_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            unchanged = workspace / "existing.pdf"
+            unchanged.write_bytes(b"old")
+            before = workspace_file_snapshot(workspace)
+            report = workspace / "report.xlsx"
+            report.write_bytes(b"xlsx-content")
+            (workspace / "script.py").write_text("print('done')", encoding="utf-8")
+            internal = workspace / ".clawpi" / "attachments"
+            internal.mkdir(parents=True)
+            (internal / "upload.txt").write_text("private", encoding="utf-8")
+
+            attachments = collect_generated_attachments(workspace, before)
+
+            self.assertEqual([item["name"] for item in attachments], ["report.xlsx"])
+            self.assertEqual(base64.b64decode(attachments[0]["data"]), b"xlsx-content")
+            self.assertEqual(
+                attachments[0]["mimeType"],
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
 
     def test_does_not_echo_user_message_when_provider_rejects_key(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

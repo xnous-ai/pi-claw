@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import io
 import json
+import mimetypes
 import os
 import queue
 import re
@@ -64,6 +65,39 @@ PROVIDER_CATALOG = [
 
 MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024
 MAX_ATTACHMENTS_BYTES = 6 * 1024 * 1024
+GENERATED_ATTACHMENT_SUFFIXES = {
+    ".csv",
+    ".doc",
+    ".docx",
+    ".gif",
+    ".jpeg",
+    ".jpg",
+    ".json",
+    ".md",
+    ".pdf",
+    ".png",
+    ".ppt",
+    ".pptx",
+    ".svg",
+    ".txt",
+    ".webp",
+    ".xls",
+    ".xlsx",
+    ".zip",
+}
+GENERATED_ATTACHMENT_IGNORED_DIRECTORIES = {
+    ".clawpi",
+    ".git",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "venv",
+}
+GENERATED_ATTACHMENT_MIME_TYPES = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
 PROVIDER_API_KEY_ENV = {provider: env for provider, _, env in PROVIDER_CATALOG}
 
 
@@ -1021,6 +1055,72 @@ def chat_prompt(text: str, attachments: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def workspace_file_snapshot(workspace: Path) -> dict[str, tuple[int, int]]:
+    snapshot: dict[str, tuple[int, int]] = {}
+    if not workspace.is_dir():
+        return snapshot
+    for root, directories, files in os.walk(workspace, followlinks=False):
+        directories[:] = [
+            name for name in directories
+            if name not in GENERATED_ATTACHMENT_IGNORED_DIRECTORIES and not name.startswith(".")
+        ]
+        root_path = Path(root)
+        for name in files:
+            path = root_path / name
+            try:
+                if path.is_symlink():
+                    continue
+                stat_result = path.stat()
+                relative_path = path.relative_to(workspace).as_posix()
+            except (OSError, ValueError):
+                continue
+            snapshot[relative_path] = (stat_result.st_mtime_ns, stat_result.st_size)
+    return snapshot
+
+
+def collect_generated_attachments(
+    workspace: Path,
+    before: dict[str, tuple[int, int]],
+) -> list[dict]:
+    changed: list[tuple[int, Path, int]] = []
+    for relative_path, (modified_at, size) in workspace_file_snapshot(workspace).items():
+        path = workspace / relative_path
+        if path.suffix.lower() not in GENERATED_ATTACHMENT_SUFFIXES:
+            continue
+        if size <= 0 or size > MAX_ATTACHMENT_BYTES:
+            continue
+        if before.get(relative_path) == (modified_at, size):
+            continue
+        changed.append((modified_at, path, size))
+
+    attachments = []
+    total_size = 0
+    for _modified_at, path, size in sorted(changed, key=lambda item: item[0], reverse=True):
+        if len(attachments) >= 3 or total_size + size > MAX_ATTACHMENTS_BYTES:
+            continue
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        if len(data) != size:
+            size = len(data)
+        if not data or size > MAX_ATTACHMENT_BYTES or total_size + size > MAX_ATTACHMENTS_BYTES:
+            continue
+        attachments.append(
+            {
+                "id": f"generated-{uuid4()}",
+                "name": path.name[:200],
+                "mimeType": GENERATED_ATTACHMENT_MIME_TYPES.get(path.suffix.lower())
+                or mimetypes.guess_type(path.name)[0]
+                or "application/octet-stream",
+                "size": size,
+                "data": base64.b64encode(data).decode("ascii"),
+            }
+        )
+        total_size += size
+    return attachments
+
+
 async def handle_chat(
     websocket,
     message: dict,
@@ -1043,11 +1143,14 @@ async def handle_chat(
         )
         if not text.strip() and not attachments:
             raise ValueError("聊天请求无效")
+        workspace_before = workspace_file_snapshot(agent.workspace)
         print(
             f"收到聊天请求：request={request_id} session={session_id} "
             f"provider={agent.provider or 'default'} model={agent.model or 'default'}",
             flush=True,
         )
+
+        response_parts: list[str] = []
 
         async def forward_response() -> None:
             async def forward_event(event: dict) -> None:
@@ -1061,6 +1164,7 @@ async def handle_chat(
                 on_event=forward_event,
                 interactions=interactions,
             ):
+                response_parts.append(delta)
                 await websocket.send(
                     json.dumps(
                         {"type": "chat.delta", "requestId": request_id, "delta": delta},
@@ -1069,12 +1173,15 @@ async def handle_chat(
                 )
 
         await asyncio.wait_for(forward_response(), timeout)
+        generated_attachments = collect_generated_attachments(agent.workspace, workspace_before)
         await websocket.send(
             json.dumps(
                 {
                     "type": "chat.complete",
                     "requestId": request_id,
                     "messageId": f"pi-{uuid4()}",
+                    "text": "".join(response_parts),
+                    "attachments": generated_attachments,
                 }
             )
         )

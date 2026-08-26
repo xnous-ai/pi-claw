@@ -6,6 +6,40 @@ from uuid import uuid4
 from fastapi import WebSocket
 
 
+MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024
+MAX_ATTACHMENTS_BYTES = 6 * 1024 * 1024
+
+
+def generated_attachments(value: object) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    attachments = []
+    total_size = 0
+    for item in value[:3]:
+        if not isinstance(item, dict):
+            continue
+        size = item.get("size")
+        data = item.get("data")
+        name = str(item.get("name") or "").strip()
+        if not isinstance(size, int) or size <= 0 or size > MAX_ATTACHMENT_BYTES:
+            continue
+        if not isinstance(data, str) or not data or len(data) > (MAX_ATTACHMENT_BYTES * 4 // 3) + 8:
+            continue
+        if not name or total_size + size > MAX_ATTACHMENTS_BYTES:
+            continue
+        attachments.append(
+            {
+                "id": str(item.get("id") or uuid4()),
+                "name": name[:200],
+                "mimeType": str(item.get("mimeType") or "application/octet-stream")[:200],
+                "size": size,
+                "data": data,
+            }
+        )
+        total_size += size
+    return attachments
+
+
 class HostOffline(Exception):
     pass
 
@@ -324,6 +358,9 @@ class Relay:
                 "text": str(payload.get("text") or "".join(pending.chunks)),
                 "createdAt": str(payload.get("createdAt") or datetime.now(UTC).isoformat()),
             }
+            attachments = generated_attachments(payload.get("attachments"))
+            if attachments:
+                message["attachments"] = attachments
             if pending.events is not None:
                 pending.events.put_nowait({"type": "chat.complete", "message": message})
             pending.future.set_result(message)

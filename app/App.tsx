@@ -1,7 +1,8 @@
 import { SymbolView, type AndroidSymbol } from 'expo-symbols';
 import { StatusBar as ExpoStatusBar } from 'expo-status-bar';
 import * as DocumentPicker from 'expo-document-picker';
-import { File } from 'expo-file-system';
+import { Directory, EncodingType, File, Paths } from 'expo-file-system';
+import * as Sharing from 'expo-sharing';
 import { useEffect, useRef, useState } from 'react';
 import {
   KeyboardAvoidingView as KeyboardControllerAvoidingView,
@@ -55,6 +56,7 @@ import {
   type AuthSession,
   type Conversation,
   type ChatAttachment,
+  type ChatAttachmentTransfer,
   type ChatAttachmentUpload,
   type Device,
   type DeviceCapability,
@@ -136,6 +138,61 @@ function formatBytes(value: number | null) {
     unit += 1;
   }
   return `${size >= 10 || unit === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
+}
+
+function persistGeneratedAttachments(attachments: ChatAttachmentTransfer[] = []): ChatAttachment[] {
+  if (!attachments.length) return [];
+  const directory = new Directory(Paths.document, 'agent-files');
+  directory.create({ idempotent: true, intermediates: true });
+  return attachments.map((attachment, index) => {
+    const safeName = attachment.name
+      .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+      .replace(/^\.+|[. ]+$/g, '')
+      .slice(0, 120) || 'agent-file';
+    try {
+      const file = new File(directory, `${Date.now()}-${index}-${safeName}`);
+      file.create({ overwrite: true, intermediates: true });
+      file.write(attachment.data, { encoding: EncodingType.Base64 });
+      return {
+        id: attachment.id,
+        name: attachment.name,
+        mimeType: attachment.mimeType,
+        size: attachment.size,
+        uri: file.uri,
+      };
+    } catch {
+      return {
+        id: attachment.id,
+        name: attachment.name,
+        mimeType: attachment.mimeType,
+        size: attachment.size,
+      };
+    }
+  });
+}
+
+async function openGeneratedAttachment(attachment: ChatAttachment) {
+  if (!attachment.uri) {
+    Alert.alert('文件不可用', '文件未能保存到手机，请让 Agent 重新生成。');
+    return;
+  }
+  try {
+    const file = new File(attachment.uri);
+    if (!file.exists) {
+      Alert.alert('文件已不存在', '文件可能已被系统清理，请让 Agent 重新生成。');
+      return;
+    }
+    if (!await Sharing.isAvailableAsync()) {
+      Alert.alert('无法打开文件', '当前设备没有可用的文件处理应用。');
+      return;
+    }
+    await Sharing.shareAsync(file.uri, {
+      dialogTitle: '打开或保存文件',
+      mimeType: attachment.mimeType,
+    });
+  } catch (openError) {
+    Alert.alert('无法打开文件', errorMessage(openError));
+  }
 }
 
 function createWelcomeMessage(): AgentMessage {
@@ -1240,9 +1297,31 @@ function ChatScreen({
                 <View style={styles.agentAvatar}><Text style={styles.agentAvatarText}>P</Text></View>
                 <View style={styles.agentMessageColumn}>
                   <AgentProcess message={message} onRespond={onRespondInteraction} />
-                  {!message.streaming && !!message.text && (
+                  {!message.streaming && (!!message.text || !!message.attachments?.length) && (
                     <View style={[styles.messageBubble, styles.agentBubble, styles.agentResultBubble]}>
-                      <Text style={styles.agentMessageText}>{message.text}</Text>
+                      {!!message.text && <Text style={styles.agentMessageText}>{message.text}</Text>}
+                      {!!message.attachments?.length && (
+                        <View style={[styles.messageAttachments, !!message.text && styles.agentAttachments]}>
+                          {message.attachments.map((attachment) => (
+                            <Pressable
+                              accessibilityLabel={`打开文件 ${attachment.name}`}
+                              key={attachment.id}
+                              onPress={() => openGeneratedAttachment(attachment)}
+                              style={({ pressed }) => [
+                                styles.agentAttachmentRow,
+                                pressed && styles.agentAttachmentRowPressed,
+                              ]}
+                            >
+                              <Icon color={colors.accent} name="description" size={19} />
+                              <View style={styles.messageAttachmentCopy}>
+                                <Text numberOfLines={1} style={styles.agentAttachmentName}>{attachment.name}</Text>
+                                <Text style={styles.agentAttachmentSize}>{formatBytes(attachment.size)}</Text>
+                              </View>
+                              <Icon color={colors.subtle} name="download" size={18} />
+                            </Pressable>
+                          ))}
+                        </View>
+                      )}
                       <Text style={styles.agentTime}>{formatTime(message.createdAt)}</Text>
                     </View>
                   )}
@@ -2453,6 +2532,7 @@ function AppContent() {
           id: reply.id,
           text: reply.text,
           createdAt: reply.createdAt,
+          attachments: persistGeneratedAttachments(reply.attachments),
           status: undefined,
           streaming: false,
         };
@@ -2697,6 +2777,11 @@ const styles = StyleSheet.create({
   messageAttachmentCopy: { flex: 1, marginLeft: 7, minWidth: 0 },
   messageAttachmentName: { color: colors.surface, fontSize: 12, fontWeight: '700' },
   messageAttachmentSize: { color: '#C6D0E0', fontSize: 10, marginTop: 2 },
+  agentAttachments: { marginTop: 10 },
+  agentAttachmentRow: { alignItems: 'center', backgroundColor: colors.background, borderColor: colors.line, borderRadius: 6, borderWidth: 1, flexDirection: 'row', marginBottom: 6, minHeight: 48, paddingHorizontal: 10, paddingVertical: 7 },
+  agentAttachmentRowPressed: { backgroundColor: colors.accentSoft },
+  agentAttachmentName: { color: colors.ink, fontSize: 12, fontWeight: '700' },
+  agentAttachmentSize: { color: colors.subtle, fontSize: 10, marginTop: 2 },
   agentTime: { color: colors.subtle, fontSize: 10, marginTop: 6 },
   userTime: { color: '#C6D0E0', fontSize: 10, marginTop: 6, textAlign: 'right' },
   messageError: { alignItems: 'flex-start', alignSelf: 'flex-end', flexDirection: 'row', marginTop: 6, maxWidth: '79%' },
