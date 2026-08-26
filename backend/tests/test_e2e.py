@@ -231,6 +231,24 @@ class BackendFlowTest(unittest.TestCase):
                         }
                     )
                 )
+                commands_request = json.loads(await websocket.recv())
+                self.assertEqual(commands_request["type"], "agent.commands.get")
+                await websocket.send(json.dumps({
+                    "type": "agent.commands",
+                    "requestId": commands_request["requestId"],
+                    "commands": [
+                        {
+                            "name": "weather",
+                            "description": "查询天气",
+                            "source": "extension",
+                        },
+                        {
+                            "name": "skill:writer",
+                            "description": "写作助手",
+                            "source": "skill",
+                        },
+                    ],
+                }))
                 request = json.loads(await websocket.recv())
                 self.assertEqual(request["type"], "chat.request")
                 await websocket.send(
@@ -382,6 +400,14 @@ class BackendFlowTest(unittest.TestCase):
             },
         )
 
+        status, commands = http_json(
+            f"{self.base}/v1/devices/{device['id']}/commands",
+            token=token,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(commands[0]["name"], "weather")
+        self.assertEqual(commands[1]["source"], "skill")
+
         status, reply = http_json(
             f"{self.base}/v1/devices/{device['id']}/messages",
             "POST",
@@ -433,7 +459,7 @@ class BackendFlowTest(unittest.TestCase):
         self.assertEqual(stream_events[3]["options"], ["继续", "停止"])
         self.assertEqual(stream_events[-1]["message"]["text"], "我需要你选择继续")
 
-        async def disconnected_chat() -> None:
+        async def cancelled_chat() -> None:
             async with connect(f"ws://127.0.0.1:{self.port}/v1/chat/ws") as websocket:
                 await websocket.send(json.dumps({"type": "auth", "token": token}))
                 await websocket.recv()
@@ -446,8 +472,11 @@ class BackendFlowTest(unittest.TestCase):
                 }))
                 started = json.loads(await websocket.recv())
                 self.assertEqual(started["type"], "chat.started")
+                await websocket.send(json.dumps({"type": "chat.cancel"}))
+                cancelled = json.loads(await websocket.recv())
+                self.assertEqual(cancelled["type"], "chat.cancelled")
 
-        asyncio.run(disconnected_chat())
+        asyncio.run(cancelled_chat())
 
         status, unauthorized = http_json(f"{self.base}/v1/admin/overview")
         self.assertEqual(status, 401)

@@ -838,9 +838,19 @@ async def user_chat_websocket(websocket: WebSocket) -> None:
                 except HostOffline:
                     await send({"type": "chat.error", "message": "主机连接已断开"})
             elif event_type == "chat.cancel" and active:
+                device_id = str(active["deviceId"])
+                request_id = str(active["requestId"])
+                connection = active["connection"]
                 await relay.cancel_chat(
-                    str(active["deviceId"]), str(active["requestId"])
+                    device_id, request_id
                 )
+                relay.finish_chat(connection, request_id)
+                active.clear()
+                if stream_task and not stream_task.done():
+                    stream_task.cancel()
+                    await asyncio.gather(stream_task, return_exceptions=True)
+                stream_task = None
+                await send({"type": "chat.cancelled", "requestId": request_id})
             else:
                 await send({"type": "chat.error", "message": "不支持的聊天操作"})
     except WebSocketDisconnect:
@@ -898,6 +908,25 @@ async def get_agent_config(
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "主机连接已断开")
     except TimeoutError:
         raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, "读取主机配置超时")
+    except RuntimeError as error:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(error))
+
+
+@app.get("/v1/devices/{device_id}/commands")
+async def get_agent_commands(
+    device_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    device = owned_device(device_id, user, db)
+    if not relay.is_online(device.id):
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "主机当前离线")
+    try:
+        return await relay.get_commands(device.id)
+    except HostOffline:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "主机连接已断开")
+    except TimeoutError:
+        raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, "读取命令目录超时")
     except RuntimeError as error:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(error))
 

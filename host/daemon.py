@@ -641,6 +641,51 @@ class PiRpcAgent:
                     process.kill()
                     await process.wait()
 
+    async def available_commands(self) -> list[dict]:
+        process = await asyncio.create_subprocess_exec(
+            self.command,
+            "--mode",
+            "rpc",
+            "--no-session",
+            "--approve",
+            "--no-tools",
+            cwd=self.workspace,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            limit=1024 * 1024,
+        )
+        assert process.stdin and process.stdout and process.stderr
+        try:
+            process.stdin.write(b'{"id":"clawpi-commands","type":"get_commands"}\n')
+            await process.stdin.drain()
+            while line := await process.stdout.readline():
+                event = json.loads(line)
+                if event.get("type") != "response" or event.get("command") != "get_commands":
+                    continue
+                if not event.get("success", False):
+                    raise RuntimeError(str(event.get("error") or "Pi 命令目录读取失败"))
+                commands = event.get("data", {}).get("commands", [])
+                return [
+                    {
+                        "name": str(command.get("name", ""))[:120],
+                        "description": str(command.get("description") or "")[:300],
+                        "source": str(command.get("source") or "extension"),
+                    }
+                    for command in commands
+                    if isinstance(command, dict) and command.get("name")
+                ]
+            detail = (await process.stderr.read()).decode(errors="replace").strip()
+            raise RuntimeError(detail or "Pi 命令目录读取失败")
+        finally:
+            if process.returncode is None:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), 3)
+                except TimeoutError:
+                    process.kill()
+                    await process.wait()
+
     async def stream(
         self,
         conversation_id: str,
@@ -984,6 +1029,35 @@ async def handle_agent_config_query(
         )
 
 
+async def handle_agent_commands(websocket, message: dict, agent: PiRpcAgent) -> None:
+    request_id = str(message.get("requestId", ""))
+    try:
+        if not request_id:
+            raise ValueError("命令目录请求无效")
+        commands = await asyncio.wait_for(agent.available_commands(), timeout=25)
+        await websocket.send(
+            json.dumps(
+                {
+                    "type": "agent.commands",
+                    "requestId": request_id,
+                    "commands": commands,
+                },
+                ensure_ascii=False,
+            )
+        )
+    except Exception as error:
+        await websocket.send(
+            json.dumps(
+                {
+                    "type": "agent.commands.error",
+                    "requestId": request_id,
+                    "message": str(error)[:300] or "读取命令目录失败",
+                },
+                ensure_ascii=False,
+            )
+        )
+
+
 def load_capability_state(path: Path) -> list[dict]:
     if not path.exists():
         return []
@@ -1261,6 +1335,8 @@ async def run_host(
                             await handle_agent_config_query(
                                 websocket, message, agent, agent_config_path
                             )
+                        elif message.get("type") == "agent.commands.get":
+                            await handle_agent_commands(websocket, message, agent)
                         elif str(message.get("type", "")).startswith("capability."):
                             await handle_capability(
                                 websocket,

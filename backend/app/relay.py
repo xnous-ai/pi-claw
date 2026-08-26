@@ -193,6 +193,28 @@ class Relay:
         finally:
             connection.pending.pop(request_id, None)
 
+    async def get_commands(self, device_id: str) -> list[dict]:
+        connection = self._hosts.get(device_id)
+        if not connection:
+            raise HostOffline
+        request_id = str(uuid4())
+        pending = PendingRequest(
+            asyncio.get_running_loop().create_future(), kind="agent-commands"
+        )
+        connection.pending[request_id] = pending
+        try:
+            try:
+                async with connection.send_lock:
+                    await connection.websocket.send_json(
+                        {"type": "agent.commands.get", "requestId": request_id}
+                    )
+            except (OSError, RuntimeError) as error:
+                raise HostOffline from error
+            result = await asyncio.wait_for(pending.future, timeout=30)
+            return result.get("commands", [])
+        finally:
+            connection.pending.pop(request_id, None)
+
     async def capability(
         self,
         device_id: str,
@@ -323,6 +345,32 @@ class Relay:
             and not pending.future.done()
         ):
             pending.future.set_exception(RuntimeError(str(payload.get("message") or "Agent 配置失败")))
+        elif (
+            payload.get("type") == "agent.commands"
+            and pending.kind == "agent-commands"
+            and not pending.future.done()
+        ):
+            pending.future.set_result(
+                {
+                    "commands": [
+                        {
+                            "name": str(item.get("name", "")),
+                            "description": str(item.get("description", "")),
+                            "source": str(item.get("source", "extension")),
+                        }
+                        for item in payload.get("commands", [])[:200]
+                        if isinstance(item, dict) and item.get("name")
+                    ]
+                }
+            )
+        elif (
+            payload.get("type") == "agent.commands.error"
+            and pending.kind == "agent-commands"
+            and not pending.future.done()
+        ):
+            pending.future.set_exception(
+                RuntimeError(str(payload.get("message") or "读取命令目录失败"))
+            )
         elif (
             payload.get("type") == "capability.result"
             and pending.kind == "capability"

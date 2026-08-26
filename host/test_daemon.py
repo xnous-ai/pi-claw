@@ -22,6 +22,7 @@ from daemon import (
     connect_wifi,
     has_network_connection,
     handle_agent_configuration,
+    handle_agent_commands,
     handle_agent_config_query,
     handle_chat,
     install_capability,
@@ -246,6 +247,28 @@ class PiRpcAgentTest(unittest.TestCase):
         extension = Path("clawpi-interaction.ts").read_text(encoding="utf-8")
         self.assertIn("clawpi-interaction.ts", install_script)
         self.assertIn('name: "ask_user"', extension)
+
+    def test_lists_extension_and_skill_commands(self) -> None:
+        class CommandAgent:
+            async def available_commands(self) -> list[dict]:
+                return [
+                    {"name": "weather", "description": "查询天气", "source": "extension"},
+                    {"name": "skill:writer", "description": "写作", "source": "skill"},
+                ]
+
+        class FakeWebsocket:
+            def __init__(self) -> None:
+                self.messages: list[dict] = []
+
+            async def send(self, value: str) -> None:
+                self.messages.append(json.loads(value))
+
+        websocket = FakeWebsocket()
+        asyncio.run(
+            handle_agent_commands(websocket, {"requestId": "commands-1"}, CommandAgent())
+        )
+        self.assertEqual(websocket.messages[0]["type"], "agent.commands")
+        self.assertEqual(websocket.messages[0]["commands"][0]["name"], "weather")
 
 
 class ProvisioningTest(unittest.TestCase):

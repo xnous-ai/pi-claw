@@ -36,7 +36,13 @@ export type AgentMessage = {
 export type AgentStep = {
   id: string;
   label: string;
-  state: 'running' | 'done' | 'error';
+  state: 'running' | 'done' | 'error' | 'cancelled';
+};
+
+export type AgentCommand = {
+  name: string;
+  description: string;
+  source: 'extension' | 'prompt' | 'skill';
 };
 
 export type AgentInteraction = {
@@ -143,6 +149,13 @@ class ApiError extends Error {
   constructor(message: string, readonly status: number) {
     super(message);
     this.name = 'ApiError';
+  }
+}
+
+export class AgentCancelledError extends Error {
+  constructor() {
+    super('已停止运行');
+    this.name = 'AgentCancelledError';
   }
 }
 
@@ -538,12 +551,31 @@ export async function releaseDevice(token: string, deviceId: string) {
   );
 }
 
+export async function getDeviceCommands(
+  token: string,
+  deviceId: string,
+): Promise<AgentCommand[]> {
+  if (isDemoMode) {
+    return [
+      { name: 'skill:writer', description: '调用写作 Skill', source: 'skill' },
+      { name: 'weather', description: '查询天气', source: 'extension' },
+    ];
+  }
+  return request<AgentCommand[]>(
+    `/v1/devices/${encodeURIComponent(deviceId)}/commands`,
+    { method: 'GET' },
+    token,
+    35_000,
+  );
+}
+
 export async function streamAgentMessage(
   token: string,
   deviceId: string,
   conversationId: string,
   text: string,
   handlers: AgentStreamHandlers,
+  signal?: AbortSignal,
 ): Promise<AgentMessage> {
   if (isDemoMode) {
     handlers.onStatus({ id: 'demo', label: '正在整理回复', state: 'running' });
@@ -572,7 +604,23 @@ export async function streamAgentMessage(
     function close() {
       clearTimeout(connectionTimer);
       if (heartbeatTimer) clearInterval(heartbeatTimer);
+      signal?.removeEventListener('abort', abort);
       if (socket.readyState === 0 || socket.readyState === 1) socket.close();
+    }
+
+    function abort() {
+      if (settled) return;
+      if (socket.readyState === 1) {
+        socket.send(JSON.stringify({ type: 'chat.cancel' }));
+      }
+      finishCancelled();
+    }
+
+    function finishCancelled() {
+      if (settled) return;
+      settled = true;
+      close();
+      reject(new AgentCancelledError());
     }
 
     function finishWithError(message: string) {
@@ -664,9 +712,13 @@ export async function streamAgentMessage(
           text: finalText,
           createdAt: String(message.createdAt || new Date().toISOString()),
         });
+      } else if (payload.type === 'chat.cancelled') {
+        finishCancelled();
       } else if (payload.type === 'chat.error' || payload.type === 'auth.error') {
         finishWithError(String(payload.message || 'Agent 执行失败'));
       }
     };
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
   });
 }

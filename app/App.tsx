@@ -21,6 +21,7 @@ import {
   configureDeviceNetwork,
   getDevice,
   getDeviceAgentConfig,
+  getDeviceCommands,
   getDeviceCapabilities,
   installDeviceCapability,
   isDemoMode,
@@ -32,6 +33,8 @@ import {
   removeDeviceCapability,
   scanHostWifiNetworks,
   streamAgentMessage,
+  AgentCancelledError,
+  type AgentCommand,
   type AgentInteraction,
   type AgentStep,
   type InteractionResponse,
@@ -953,6 +956,8 @@ function ChatScreen({
   device,
   sending,
   onBack,
+  onCancel,
+  onLoadCommands,
   onRespondInteraction,
   onSend,
 }: {
@@ -960,12 +965,27 @@ function ChatScreen({
   device: Device;
   sending: boolean;
   onBack: () => void;
+  onCancel: () => void;
+  onLoadCommands: () => Promise<AgentCommand[]>;
   onRespondInteraction: (interactionId: string, response: InteractionResponse, answer: string) => void;
   onSend: (text: string) => Promise<void>;
 }) {
   const [draft, setDraft] = useState('');
   const [error, setError] = useState('');
+  const [commands, setCommands] = useState<AgentCommand[]>([]);
+  const [commandsLoading, setCommandsLoading] = useState(false);
+  const inputRef = useRef<TextInput>(null);
   const scrollRef = useRef<ScrollView>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    setCommandsLoading(true);
+    onLoadCommands()
+      .then((items) => mounted && setCommands(items))
+      .catch(() => mounted && setCommands([]))
+      .finally(() => mounted && setCommandsLoading(false));
+    return () => { mounted = false; };
+  }, [device.id]);
 
   useEffect(() => {
     const timer = setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 80);
@@ -983,6 +1003,24 @@ function ChatScreen({
       setDraft(text);
       setError(errorMessage(requestError));
     }
+  }
+
+  const commandMatch = draft.match(/^\/([^\s]*)$/);
+  const commandQuery = commandMatch?.[1].toLowerCase();
+  const matchingCommands = commandQuery === undefined
+    ? []
+    : commands
+      .filter((command) => (
+        command.name.toLowerCase().includes(commandQuery)
+        || command.description.toLowerCase().includes(commandQuery)
+      ))
+      .sort((left, right) => Number(!left.name.toLowerCase().startsWith(commandQuery))
+        - Number(!right.name.toLowerCase().startsWith(commandQuery)))
+      .slice(0, 5);
+
+  function completeCommand(command: AgentCommand) {
+    setDraft(`/${command.name} `);
+    requestAnimationFrame(() => inputRef.current?.focus());
   }
 
   return (
@@ -1012,8 +1050,8 @@ function ChatScreen({
                           <ActivityIndicator color={colors.accent} size="small" />
                         ) : (
                           <Icon
-                            color={step.state === 'error' ? colors.danger : colors.success}
-                            name={step.state === 'error' ? 'error' : 'check_circle'}
+                            color={step.state === 'error' ? colors.danger : step.state === 'cancelled' ? colors.subtle : colors.success}
+                            name={step.state === 'error' ? 'error' : step.state === 'cancelled' ? 'stop_circle' : 'check_circle'}
                             size={16}
                           />
                         )}
@@ -1028,6 +1066,12 @@ function ChatScreen({
                     <Text accessibilityLiveRegion="polite" style={styles.typingText}>
                       {message.status || 'Pi agent 正在处理'}
                     </Text>
+                  </View>
+                )}
+                {message.role === 'assistant' && !message.streaming && !!message.status && (
+                  <View style={styles.stoppedStatus}>
+                    <Icon color={colors.subtle} name="stop_circle" size={16} />
+                    <Text accessibilityLiveRegion="polite" style={styles.stoppedStatusText}>{message.status}</Text>
                   </View>
                 )}
                 {!!message.text && (
@@ -1053,6 +1097,36 @@ function ChatScreen({
         ))}
       </ScrollView>
       {!!error && <Text style={styles.composerError}>{error}，消息已保留。</Text>}
+      {commandQuery !== undefined && !sending && (
+        <View style={styles.commandMenu}>
+          {commandsLoading ? (
+            <View style={styles.commandLoading}>
+              <ActivityIndicator color={colors.accent} size="small" />
+              <Text style={styles.commandLoadingText}>正在读取命令</Text>
+            </View>
+          ) : matchingCommands.length ? matchingCommands.map((command, index) => (
+            <Pressable
+              accessibilityLabel={`使用命令 /${command.name}`}
+              accessibilityRole="button"
+              key={command.name}
+              onPress={() => completeCommand(command)}
+              style={({ pressed }) => [
+                styles.commandRow,
+                index < matchingCommands.length - 1 && styles.rowDivider,
+                pressed && styles.rowPressed,
+              ]}
+            >
+              <Text numberOfLines={1} style={styles.commandName}>/{command.name}</Text>
+              <Text numberOfLines={1} style={styles.commandDescription}>{command.description}</Text>
+              <Text style={styles.commandSource}>
+                {command.source === 'skill' ? 'Skill' : command.source === 'prompt' ? '模板' : '插件'}
+              </Text>
+            </Pressable>
+          )) : (
+            <Text style={styles.commandEmpty}>没有匹配的命令</Text>
+          )}
+        </View>
+      )}
       <View style={styles.composerWrap}>
         <TextInput
           accessibilityLabel="消息输入框"
@@ -1061,21 +1135,23 @@ function ChatScreen({
           onChangeText={setDraft}
           placeholder={device.status === 'online' ? '发送消息' : '主机离线'}
           placeholderTextColor={colors.subtle}
+          ref={inputRef}
           style={styles.composerInput}
           value={draft}
         />
         <Pressable
-          accessibilityLabel="发送消息"
+          accessibilityLabel={sending ? '停止运行' : '发送消息'}
           accessibilityRole="button"
-          disabled={!draft.trim() || sending || device.status !== 'online'}
-          onPress={submit}
+          disabled={!sending && (!draft.trim() || device.status !== 'online')}
+          onPress={sending ? onCancel : submit}
           style={({ pressed }) => [
             styles.sendButton,
-            (!draft.trim() || sending || device.status !== 'online') && styles.sendButtonDisabled,
+            sending && styles.stopButton,
+            (!sending && (!draft.trim() || device.status !== 'online')) && styles.sendButtonDisabled,
             pressed && styles.pressed,
           ]}
         >
-          <Icon color={colors.surface} name="send" size={22} />
+          <Icon color={colors.surface} name={sending ? 'stop' : 'send'} size={22} />
         </Pressable>
       </View>
     </KeyboardAvoidingView>
@@ -1628,10 +1704,12 @@ function MainScreen({
   conversations,
   sending,
   onAddDevice,
+  onCancel,
   onCreateConversation,
   onConfigureDevice,
   onInstallCapability,
   onLoadCapabilities,
+  onLoadCommands,
   onLoadDeviceConfig,
   onRemoveCapability,
   onRefreshDevice,
@@ -1644,10 +1722,12 @@ function MainScreen({
   conversations: Conversation[];
   sending: boolean;
   onAddDevice: (device: Device) => Promise<void>;
+  onCancel: () => void;
   onCreateConversation: (deviceId: string) => Promise<Conversation>;
   onConfigureDevice: (deviceId: string, provider: AgentProvider, apiKey: string | undefined, model: string) => Promise<AgentConfiguration>;
   onInstallCapability: (deviceId: string, capabilityId: string) => Promise<void>;
   onLoadCapabilities: (deviceId: string) => Promise<DeviceCapability[]>;
+  onLoadCommands: (deviceId: string) => Promise<AgentCommand[]>;
   onLoadDeviceConfig: (deviceId: string) => Promise<AgentConfiguration>;
   onRemoveCapability: (deviceId: string, capabilityId: string) => Promise<void>;
   onRefreshDevice: (deviceId: string) => Promise<void>;
@@ -1708,6 +1788,8 @@ function MainScreen({
         conversation={conversation}
         device={device}
         onBack={() => setRoute({ name: 'root' })}
+        onCancel={onCancel}
+        onLoadCommands={() => onLoadCommands(device.id)}
         onRespondInteraction={onRespondInteraction}
         onSend={(text) => onSend(conversation.id, text)}
         sending={sending}
@@ -1805,6 +1887,7 @@ function AppContent() {
   const [session, setSession] = useState<AuthSession | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [sending, setSending] = useState(false);
+  const activeChat = useRef<AbortController | null>(null);
   const interactionResponders = useRef(new Map<string, {
     answer: (label: string) => void;
     respond: (response: InteractionResponse) => void;
@@ -1898,6 +1981,11 @@ function AppContent() {
     return getDeviceCapabilities(session.token, deviceId);
   }
 
+  async function loadCommands(deviceId: string) {
+    if (!session) throw new Error('登录状态已失效');
+    return getDeviceCommands(session.token, deviceId);
+  }
+
   async function installCapability(deviceId: string, capabilityId: string) {
     if (!session) throw new Error('登录状态已失效');
     await installDeviceCapability(session.token, deviceId, capabilityId);
@@ -1946,6 +2034,10 @@ function AppContent() {
     interactionResponders.current.delete(interactionId);
   }
 
+  function cancelMessage() {
+    activeChat.current?.abort();
+  }
+
   async function sendMessage(conversationId: string, text: string) {
     if (!session || sending) return;
     const original = conversations.find((item) => item.id === conversationId);
@@ -1983,6 +2075,8 @@ function AppContent() {
     }
 
     setConversations((current) => current.map((item) => item.id === conversationId ? pendingConversation : item));
+    const controller = new AbortController();
+    activeChat.current = controller;
     setSending(true);
     try {
       try {
@@ -2030,6 +2124,7 @@ function AppContent() {
               publish();
             },
           },
+          controller.signal,
         );
         assistantMessage = {
           ...assistantMessage,
@@ -2050,6 +2145,30 @@ function AppContent() {
         setConversations(next);
         await saveConversations(next);
       } catch (sendError) {
+        if (sendError instanceof AgentCancelledError) {
+          assistantMessage = {
+            ...assistantMessage,
+            interaction: assistantMessage.interaction
+              ? { ...assistantMessage.interaction, pending: false, answer: '已停止' }
+              : undefined,
+            status: '已停止运行',
+            steps: assistantMessage.steps?.map((step) => (
+              step.state === 'running' ? { ...step, state: 'cancelled' as const } : step
+            )),
+            streaming: false,
+          };
+          const stopped = {
+            ...pendingConversation,
+            updatedAt: new Date().toISOString(),
+            messages: [...originalMessages, userMessage, assistantMessage],
+          };
+          const next = conversations
+            .map((item) => item.id === conversationId ? stopped : item)
+            .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+          setConversations(next);
+          await saveConversations(next);
+          return;
+        }
         const failedMessage = { ...userMessage, error: errorMessage(sendError) };
         const keepAssistant = !!assistantMessage.text || !!assistantMessage.steps?.length || !!assistantMessage.interaction;
         assistantMessage = { ...assistantMessage, status: undefined, streaming: false };
@@ -2069,6 +2188,7 @@ function AppContent() {
         return;
       }
     } finally {
+      if (activeChat.current === controller) activeChat.current = null;
       activeInteractionIds.forEach((id) => interactionResponders.current.delete(id));
       setSending(false);
     }
@@ -2093,10 +2213,12 @@ function AppContent() {
     <MainScreen
       conversations={conversations}
       onAddDevice={addDevice}
+      onCancel={cancelMessage}
       onConfigureDevice={configureAgent}
       onCreateConversation={createConversation}
       onInstallCapability={installCapability}
       onLoadCapabilities={loadCapabilities}
+      onLoadCommands={loadCommands}
       onLoadDeviceConfig={loadAgentConfig}
       onRemoveCapability={removeCapability}
       onRefreshDevice={refreshDevice}
@@ -2248,6 +2370,8 @@ const styles = StyleSheet.create({
   agentStepText: { color: colors.muted, flex: 1, fontSize: 12, lineHeight: 17, marginLeft: 7 },
   inlineAgentStatus: { alignItems: 'center', flexDirection: 'row', minHeight: 28 },
   typingText: { color: colors.muted, fontSize: 13, marginLeft: 8 },
+  stoppedStatus: { alignItems: 'center', flexDirection: 'row', minHeight: 26 },
+  stoppedStatusText: { color: colors.subtle, fontSize: 12, lineHeight: 18, marginLeft: 6 },
   interactionBlock: { borderTopColor: colors.line, borderTopWidth: StyleSheet.hairlineWidth, marginTop: 12, paddingTop: 12 },
   interactionTitle: { color: colors.ink, fontSize: 14, fontWeight: '700', lineHeight: 20 },
   interactionMessage: { color: colors.muted, fontSize: 12, lineHeight: 18, marginTop: 3 },
@@ -2264,9 +2388,18 @@ const styles = StyleSheet.create({
   interactionAnswered: { alignItems: 'center', borderTopColor: colors.line, borderTopWidth: StyleSheet.hairlineWidth, flexDirection: 'row', marginTop: 12, minHeight: 34, paddingTop: 9 },
   interactionAnsweredText: { color: colors.success, flex: 1, fontSize: 12, lineHeight: 18, marginLeft: 6 },
   composerError: { backgroundColor: colors.dangerSoft, color: colors.danger, fontSize: 12, lineHeight: 18, paddingHorizontal: 16, paddingVertical: 7 },
+  commandMenu: { backgroundColor: colors.surface, borderTopColor: colors.line, borderTopWidth: 1, maxHeight: 270, overflow: 'hidden', paddingHorizontal: 12 },
+  commandLoading: { alignItems: 'center', flexDirection: 'row', minHeight: 52, paddingHorizontal: 4 },
+  commandLoadingText: { color: colors.muted, fontSize: 13, marginLeft: 9 },
+  commandRow: { alignItems: 'center', flexDirection: 'row', minHeight: 52, paddingHorizontal: 4, paddingVertical: 8 },
+  commandName: { color: colors.accent, fontSize: 14, fontWeight: '700', maxWidth: '42%' },
+  commandDescription: { color: colors.muted, flex: 1, fontSize: 12, marginLeft: 10, marginRight: 8 },
+  commandSource: { color: colors.subtle, fontSize: 11 },
+  commandEmpty: { color: colors.subtle, fontSize: 13, lineHeight: 20, minHeight: 52, paddingHorizontal: 4, paddingVertical: 16 },
   composerWrap: { alignItems: 'flex-end', backgroundColor: colors.surface, borderTopColor: colors.line, borderTopWidth: 1, flexDirection: 'row', paddingHorizontal: 12, paddingVertical: 10 },
   composerInput: { backgroundColor: colors.background, borderColor: colors.line, borderRadius: 8, borderWidth: 1, color: colors.ink, flex: 1, fontSize: 15, maxHeight: 100, minHeight: 48, paddingHorizontal: 14, paddingTop: 12 },
   sendButton: { alignItems: 'center', backgroundColor: colors.accent, borderRadius: 8, height: 48, justifyContent: 'center', marginLeft: 8, width: 48 },
+  stopButton: { backgroundColor: colors.danger },
   sendButtonDisabled: { backgroundColor: colors.line },
   deviceRow: { alignItems: 'center', flexDirection: 'row', minHeight: 76, paddingHorizontal: 14, paddingVertical: 12 },
   deviceIcon: { alignItems: 'center', backgroundColor: colors.tealSoft, borderRadius: 8, height: 46, justifyContent: 'center', marginRight: 12, width: 46 },
