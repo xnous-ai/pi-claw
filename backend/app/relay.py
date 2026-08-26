@@ -255,6 +255,14 @@ class Relay:
                 pending.events.put_nowait(
                     {"type": "chat.delta", "delta": str(payload.get("delta", ""))}
                 )
+        elif payload.get("type") == "chat.progress" and pending.events is not None:
+            pending.events.put_nowait(
+                {
+                    "type": "chat.progress",
+                    "progressId": str(payload.get("progressId") or uuid4()),
+                    "text": str(payload.get("text") or ""),
+                }
+            )
         elif payload.get("type") == "chat.status" and pending.events is not None:
             pending.events.put_nowait(
                 {

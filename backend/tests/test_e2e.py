@@ -272,6 +272,12 @@ class BackendFlowTest(unittest.TestCase):
                 stream_request = json.loads(await websocket.recv())
                 self.assertEqual(stream_request["type"], "chat.request")
                 await websocket.send(json.dumps({
+                    "type": "chat.progress",
+                    "requestId": stream_request["requestId"],
+                    "progressId": "progress-1",
+                    "text": "我先查询相关资料",
+                }))
+                await websocket.send(json.dumps({
                     "type": "chat.status",
                     "requestId": stream_request["requestId"],
                     "statusId": "tool-1",
@@ -448,6 +454,7 @@ class BackendFlowTest(unittest.TestCase):
             [event["type"] for event in stream_events],
             [
                 "chat.started",
+                "chat.progress",
                 "chat.status",
                 "chat.delta",
                 "chat.interaction",
@@ -456,7 +463,8 @@ class BackendFlowTest(unittest.TestCase):
                 "chat.complete",
             ],
         )
-        self.assertEqual(stream_events[3]["options"], ["继续", "停止"])
+        self.assertEqual(stream_events[1]["text"], "我先查询相关资料")
+        self.assertEqual(stream_events[4]["options"], ["继续", "停止"])
         self.assertEqual(stream_events[-1]["message"]["text"], "我需要你选择继续")
 
         async def cancelled_chat() -> None:

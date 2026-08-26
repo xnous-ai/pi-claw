@@ -35,6 +35,7 @@ export type AgentMessage = {
 
 export type AgentStep = {
   id: string;
+  kind?: 'text' | 'tool';
   label: string;
   state: 'running' | 'done' | 'error' | 'cancelled';
 };
@@ -661,12 +662,23 @@ export async function streamAgentMessage(
         const delta = String(payload.delta || '');
         accumulated += delta;
         if (delta) handlers.onDelta(delta);
+      } else if (payload.type === 'chat.progress') {
+        const progress = String(payload.text || '').trim();
+        if (progress) {
+          handlers.onStatus({
+            id: String(payload.progressId || `progress-${Date.now()}`),
+            kind: 'text',
+            label: progress,
+            state: 'done',
+          });
+        }
       } else if (payload.type === 'chat.status') {
         const state = ['running', 'done', 'error'].includes(payload.state)
           ? payload.state as AgentStep['state']
           : 'running';
         handlers.onStatus({
           id: String(payload.statusId || `status-${Date.now()}`),
+          kind: 'tool',
           label: String(payload.label || '正在处理'),
           state,
         });

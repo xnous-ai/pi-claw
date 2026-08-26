@@ -703,12 +703,30 @@ class PiRpcAgent:
         )
         assert process.stdin and process.stdout and process.stderr
         stderr_task = asyncio.create_task(process.stderr.read())
-        emitted = False
-        final_text = ""
+        current_text = ""
+        pending_text = ""
+        consumed_text = ""
+        progress_index = 0
 
         async def emit(event: dict) -> None:
             if on_event:
                 await on_event(event)
+
+        async def flush_progress() -> None:
+            nonlocal current_text, pending_text, consumed_text, progress_index
+            progress = (pending_text or current_text).strip()
+            if progress:
+                progress_index += 1
+                await emit(
+                    {
+                        "type": "chat.progress",
+                        "progressId": f"progress-{progress_index}",
+                        "text": progress,
+                    }
+                )
+                consumed_text = progress
+            current_text = ""
+            pending_text = ""
 
         try:
             command = {"id": "clawpi-prompt", "type": "prompt", "message": text}
@@ -721,9 +739,9 @@ class PiRpcAgent:
                 if event.get("type") == "message_update":
                     update = event.get("assistantMessageEvent", {})
                     if update.get("type") == "text_delta" and update.get("delta"):
-                        emitted = True
-                        yield str(update["delta"])
+                        current_text += str(update["delta"])
                 elif event.get("type") == "tool_execution_start":
+                    await flush_progress()
                     await emit(
                         {
                             "type": "chat.status",
@@ -744,6 +762,7 @@ class PiRpcAgent:
                 elif event.get("type") == "extension_ui_request":
                     method = str(event.get("method") or "")
                     if method in {"select", "confirm", "input", "editor"}:
+                        await flush_progress()
                         interaction_id = str(event.get("id") or uuid4())
                         response = {"cancelled": True}
                         if interactions:
@@ -843,11 +862,15 @@ class PiRpcAgent:
                         raise RuntimeError(detail)
                     candidate = message_text(message)
                     if candidate:
-                        final_text = candidate
+                        normalized = candidate.strip()
+                        pending_text = "" if normalized == consumed_text else candidate
+                        current_text = ""
+                        consumed_text = ""
                 elif event.get("type") == "agent_settled":
-                    if not emitted and final_text:
+                    final_text = (pending_text or current_text).strip()
+                    if final_text:
                         yield final_text
-                    if not emitted and not final_text:
+                    else:
                         raise RuntimeError("Pi agent 未返回文本")
                     return
             error = (await stderr_task).decode(errors="replace").strip()

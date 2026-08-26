@@ -87,6 +87,76 @@ class PiRpcAgentTest(unittest.TestCase):
             self.assertEqual(agent.session_id("same"), agent.session_id("same"))
             self.assertNotEqual(agent.session_id("one"), agent.session_id("two"))
 
+    def test_separates_tool_progress_text_from_final_answer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / "fake_progress_pi.py"
+            script.write_text(
+                textwrap.dedent(
+                    """
+                    import json
+                    import sys
+
+                    sys.stdin.reconfigure(encoding="utf-8")
+                    sys.stdout.reconfigure(encoding="utf-8")
+                    json.loads(sys.stdin.readline())
+                    print(json.dumps({
+                        "type": "message_update",
+                        "assistantMessageEvent": {"type": "text_delta", "delta": "我先检查项目配置。"}
+                    }, ensure_ascii=False), flush=True)
+                    print(json.dumps({
+                        "type": "message_end",
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "我先检查项目配置。"}]
+                        }
+                    }, ensure_ascii=False), flush=True)
+                    print(json.dumps({
+                        "type": "tool_execution_start",
+                        "toolCallId": "tool-1",
+                        "toolName": "read"
+                    }), flush=True)
+                    print(json.dumps({
+                        "type": "tool_execution_end",
+                        "toolCallId": "tool-1",
+                        "toolName": "read",
+                        "isError": False
+                    }), flush=True)
+                    print(json.dumps({
+                        "type": "message_update",
+                        "assistantMessageEvent": {"type": "text_delta", "delta": "配置检查完成。"}
+                    }, ensure_ascii=False), flush=True)
+                    print(json.dumps({
+                        "type": "message_end",
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "配置检查完成。"}]
+                        }
+                    }, ensure_ascii=False), flush=True)
+                    print(json.dumps({"type": "agent_settled"}), flush=True)
+                    sys.stdin.read()
+                    """
+                ),
+                encoding="utf-8",
+            )
+            agent = FakePiAgent(script, root)
+            events: list[dict] = []
+
+            async def collect() -> str:
+                async def on_event(event: dict) -> None:
+                    events.append(event)
+
+                return "".join(
+                    [part async for part in agent.stream("conversation-1", "检查", on_event)]
+                )
+
+            self.assertEqual(asyncio.run(collect()), "配置检查完成。")
+            self.assertEqual(
+                [event["type"] for event in events],
+                ["chat.progress", "chat.status", "chat.status"],
+            )
+            self.assertEqual(events[0]["text"], "我先检查项目配置。")
+
     def test_extracts_final_assistant_text(self) -> None:
         self.assertEqual(
             message_text(

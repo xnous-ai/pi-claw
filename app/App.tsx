@@ -995,7 +995,9 @@ function AgentProcess({
           {steps.map((step) => (
             <View key={step.id} style={styles.agentStepRow}>
               <View style={styles.agentStepIcon}>
-                {step.state === 'running' ? (
+                {step.kind === 'text' ? (
+                  <Icon color={colors.accent} name="notes" size={16} />
+                ) : step.state === 'running' ? (
                   <ActivityIndicator color={colors.accent} size="small" />
                 ) : (
                   <Icon
@@ -1005,7 +1007,7 @@ function AgentProcess({
                   />
                 )}
               </View>
-              <Text style={styles.agentStepText}>{step.label}</Text>
+              <Text style={[styles.agentStepText, step.kind === 'text' && styles.agentProgressText]}>{step.label}</Text>
             </View>
           ))}
           {running && !hasRunningStep && !message.interaction?.pending && (
@@ -2434,6 +2436,7 @@ const styles = StyleSheet.create({
   agentStepRow: { alignItems: 'flex-start', flexDirection: 'row', minHeight: 28, paddingVertical: 4, width: '100%' },
   agentStepIcon: { alignItems: 'center', justifyContent: 'center', minHeight: 18, paddingTop: 1, width: 20 },
   agentStepText: { color: colors.muted, flex: 1, flexShrink: 1, fontSize: 12, lineHeight: 18, marginLeft: 7 },
+  agentProgressText: { color: colors.ink },
   interactionBlock: { borderTopColor: colors.line, borderTopWidth: StyleSheet.hairlineWidth, marginTop: 12, paddingTop: 12 },
   interactionTitle: { color: colors.ink, fontSize: 14, fontWeight: '700', lineHeight: 20 },
   interactionMessage: { color: colors.muted, fontSize: 12, lineHeight: 18, marginTop: 3 },
