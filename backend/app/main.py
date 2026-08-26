@@ -21,7 +21,7 @@ from sqlalchemy import create_engine, delete, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from .models import Base, Capability, Device, ProvisioningSession, User, utcnow
+from .models import Base, Capability, ChatTask, Device, ProvisioningSession, User, utcnow
 from .relay import HostOffline, Relay
 from .security import (
     create_access_token,
@@ -36,6 +36,7 @@ DATABASE_URL = os.getenv("CLAWPI_DATABASE_URL", "sqlite:///./clawpi.db")
 JWT_SECRET = os.getenv("CLAWPI_JWT_SECRET", "clawpi-local-development-secret-change-me")
 ADMIN_KEY = os.getenv("CLAWPI_ADMIN_KEY", "")
 ARTIFACT_DIR = Path(os.getenv("CLAWPI_ARTIFACT_DIR", "./capability-artifacts"))
+CHAT_ARTIFACT_DIR = Path(os.getenv("CLAWPI_CHAT_ARTIFACT_DIR", str(ARTIFACT_DIR.parent / "chat-artifacts")))
 MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024
 MAX_ATTACHMENTS_BYTES = 6 * 1024 * 1024
 
@@ -78,6 +79,19 @@ ensure_compatible_schema()
 
 app = FastAPI(title="ClawPi Control Plane", version="0.1.0")
 relay = Relay()
+chat_runtimes: dict[str, dict[str, object]] = {}
+TERMINAL_CHAT_STATUSES = {"completed", "failed", "cancelled"}
+
+with SessionLocal() as startup_db:
+    interrupted = startup_db.scalars(
+        select(ChatTask).where(ChatTask.status.in_(("running", "waiting")))
+    ).all()
+    for task in interrupted:
+        task.status = "failed"
+        task.error = "聊天服务重启，任务已中断，请重新发送"
+        task.updated_at = utcnow()
+    if interrupted:
+        startup_db.commit()
 bearer = HTTPBearer(auto_error=False)
 
 
@@ -156,6 +170,15 @@ class MessageInput(BaseModel):
         if sum(item.size for item in self.attachments) > MAX_ATTACHMENTS_BYTES:
             raise ValueError("附件总大小不能超过 6 MB")
         return self
+
+
+class ChatTaskInput(MessageInput):
+    taskId: str = Field(min_length=1, max_length=128)
+
+
+class ChatInteractionInput(BaseModel):
+    interactionId: str = Field(min_length=1, max_length=128)
+    response: dict
 
 
 class ConversationAttachmentInput(BaseModel):
@@ -810,6 +833,324 @@ async def delete_device_conversation(
         "delete",
         {"conversationId": conversation_id},
     )
+
+
+def chat_task_events(task: ChatTask) -> list[dict]:
+    try:
+        value = json.loads(task.events_json)
+    except (TypeError, ValueError):
+        return []
+    return value if isinstance(value, list) else []
+
+
+def chat_task_file(task_id: str, stored_name: str) -> Path:
+    task_directory = hashlib.sha256(task_id.encode()).hexdigest()
+    return CHAT_ARTIFACT_DIR / task_directory / stored_name
+
+
+def persist_chat_result(task_id: str, message: dict) -> dict:
+    persisted = {key: value for key, value in message.items() if key != "attachments"}
+    attachments = []
+    for attachment in message.get("attachments", []):
+        if not isinstance(attachment, dict):
+            continue
+        try:
+            data = base64.b64decode(str(attachment.get("data") or ""), validate=True)
+        except (binascii.Error, ValueError):
+            continue
+        if not data or len(data) > MAX_ATTACHMENT_BYTES:
+            continue
+        stored_name = uuid4().hex
+        path = chat_task_file(task_id, stored_name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        attachments.append(
+            {
+                "id": str(attachment.get("id") or uuid4()),
+                "name": str(attachment.get("name") or "文件")[:200],
+                "mimeType": str(attachment.get("mimeType") or "application/octet-stream")[:200],
+                "size": len(data),
+                "storedName": stored_name,
+            }
+        )
+    if attachments:
+        persisted["attachments"] = attachments
+    return persisted
+
+
+def hydrate_chat_result(task_id: str, message: dict | None) -> dict | None:
+    if not isinstance(message, dict):
+        return None
+    hydrated = {key: value for key, value in message.items() if key != "attachments"}
+    attachments = []
+    total_size = 0
+    for attachment in message.get("attachments", []):
+        if not isinstance(attachment, dict):
+            continue
+        path = chat_task_file(task_id, str(attachment.get("storedName") or ""))
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        if not data or len(data) > MAX_ATTACHMENT_BYTES or total_size + len(data) > MAX_ATTACHMENTS_BYTES:
+            continue
+        attachments.append(
+            {
+                "id": str(attachment.get("id") or uuid4()),
+                "name": str(attachment.get("name") or "文件"),
+                "mimeType": str(attachment.get("mimeType") or "application/octet-stream"),
+                "size": len(data),
+                "data": base64.b64encode(data).decode("ascii"),
+            }
+        )
+        total_size += len(data)
+    if attachments:
+        hydrated["attachments"] = attachments
+    return hydrated
+
+
+def chat_task_payload(task: ChatTask) -> dict:
+    result = None
+    if task.result_json:
+        try:
+            result = hydrate_chat_result(task.id, json.loads(task.result_json))
+        except (TypeError, ValueError):
+            result = None
+    interaction = None
+    if task.interaction_json:
+        try:
+            interaction = json.loads(task.interaction_json)
+        except (TypeError, ValueError):
+            interaction = None
+    return {
+        "taskId": task.id,
+        "deviceId": task.device_id,
+        "conversationId": task.conversation_id,
+        "clientMessageId": task.client_message_id,
+        "status": task.status,
+        "text": task.response_text,
+        "events": chat_task_events(task),
+        "interaction": interaction,
+        "message": result,
+        "error": task.error,
+        "createdAt": task.created_at.isoformat(),
+        "updatedAt": task.updated_at.isoformat(),
+    }
+
+
+def owned_chat_task(task_id: str, user: User, db: Session) -> ChatTask:
+    task = db.get(ChatTask, task_id)
+    if not task or task.user_id != user.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "聊天任务不存在")
+    return task
+
+
+async def consume_chat_task(connection, request_id: str, pending, task_id: str) -> None:
+    try:
+        while True:
+            event = await pending.events.get()
+            event_type = str(event.get("type") or "")
+            with SessionLocal() as db:
+                task = db.get(ChatTask, task_id)
+                if not task or task.status in TERMINAL_CHAT_STATUSES:
+                    break
+                if event_type == "chat.delta":
+                    task.response_text += str(event.get("delta") or "")
+                elif event_type in ("chat.progress", "chat.status"):
+                    events = chat_task_events(task)
+                    event_id = str(event.get("progressId") or event.get("statusId") or "")
+                    id_key = "progressId" if event_type == "chat.progress" else "statusId"
+                    index = next(
+                        (
+                            index
+                            for index, existing in enumerate(events)
+                            if existing.get("type") == event_type
+                            and str(existing.get(id_key) or "") == event_id
+                        ),
+                        -1,
+                    )
+                    if index >= 0:
+                        events[index] = event
+                    else:
+                        events.append(event)
+                    task.events_json = json.dumps(events[-100:], ensure_ascii=False)
+                elif event_type == "chat.interaction":
+                    task.status = "waiting"
+                    task.interaction_json = json.dumps(event, ensure_ascii=False)
+                elif event_type == "chat.complete":
+                    message = persist_chat_result(task_id, event.get("message") or {})
+                    task.status = "completed"
+                    task.response_text = str(message.get("text") or task.response_text)
+                    task.result_json = json.dumps(message, ensure_ascii=False)
+                    task.interaction_json = None
+                elif event_type == "chat.error":
+                    task.status = "failed"
+                    task.error = str(event.get("message") or "Agent 执行失败")[:1000]
+                    task.interaction_json = None
+                task.updated_at = utcnow()
+                db.commit()
+                terminal = task.status in TERMINAL_CHAT_STATUSES
+            if terminal:
+                break
+    except asyncio.CancelledError:
+        raise
+    finally:
+        relay.finish_chat(connection, request_id)
+        chat_runtimes.pop(task_id, None)
+
+
+@app.post("/v1/devices/{device_id}/chat-tasks")
+async def start_chat_task(
+    device_id: str,
+    payload: ChatTaskInput,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    device = owned_device(device_id, user, db)
+    existing = db.get(ChatTask, payload.taskId)
+    if existing:
+        if existing.user_id != user.id or existing.device_id != device.id:
+            raise HTTPException(status.HTTP_409_CONFLICT, "聊天任务 ID 已被使用")
+        return chat_task_payload(existing)
+    active = db.scalar(
+        select(ChatTask).where(
+            ChatTask.device_id == device.id,
+            ChatTask.status.in_(("running", "waiting")),
+        )
+    )
+    if active:
+        raise HTTPException(status.HTTP_409_CONFLICT, "主机正在处理另一条消息")
+    if not relay.is_online(device.id):
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "主机当前离线")
+    try:
+        connection, request_id, pending = await relay.start_chat(
+            device.id,
+            payload.conversationId,
+            payload.text,
+            [item.model_dump() for item in payload.attachments],
+            stream=True,
+            conversation_title=payload.conversationTitle,
+            client_message_id=payload.clientMessageId,
+            created_at=payload.createdAt,
+            request_id=payload.taskId,
+        )
+    except HostOffline:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "主机连接已断开")
+    except RuntimeError as error:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(error))
+    task = ChatTask(
+        id=payload.taskId,
+        user_id=user.id,
+        device_id=device.id,
+        conversation_id=payload.conversationId,
+        client_message_id=payload.clientMessageId or payload.taskId,
+        status="running",
+    )
+    try:
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+    except Exception:
+        relay.finish_chat(connection, request_id)
+        await relay.cancel_chat(device.id, request_id)
+        raise
+    consumer = asyncio.create_task(consume_chat_task(connection, request_id, pending, task.id))
+    chat_runtimes[task.id] = {
+        "deviceId": device.id,
+        "requestId": request_id,
+        "connection": connection,
+        "consumer": consumer,
+    }
+    return chat_task_payload(task)
+
+
+@app.get("/v1/chat-tasks")
+def list_chat_tasks(
+    conversationId: str | None = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    query = select(ChatTask).where(ChatTask.user_id == user.id)
+    if conversationId:
+        query = query.where(ChatTask.conversation_id == conversationId)
+    tasks = db.scalars(query.order_by(ChatTask.updated_at.desc()).limit(20)).all()
+    return [chat_task_payload(task) for task in tasks]
+
+
+@app.get("/v1/chat-tasks/{task_id}")
+def get_chat_task(
+    task_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    return chat_task_payload(owned_chat_task(task_id, user, db))
+
+
+def clean_chat_interaction_response(response: object) -> dict:
+    if isinstance(response, dict) and response.get("cancelled") is True:
+        return {"cancelled": True}
+    if isinstance(response, dict) and isinstance(response.get("confirmed"), bool):
+        return {"confirmed": response["confirmed"]}
+    if isinstance(response, dict) and isinstance(response.get("value"), str):
+        return {"value": response["value"][:4000]}
+    raise HTTPException(status.HTTP_400_BAD_REQUEST, "选择结果无效")
+
+
+@app.post("/v1/chat-tasks/{task_id}/interaction")
+async def respond_chat_task_interaction(
+    task_id: str,
+    payload: ChatInteractionInput,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    task = owned_chat_task(task_id, user, db)
+    if task.status != "waiting" or not task.interaction_json:
+        raise HTTPException(status.HTTP_409_CONFLICT, "这个操作已经失效")
+    interaction = json.loads(task.interaction_json)
+    if str(interaction.get("interactionId") or "") != payload.interactionId:
+        raise HTTPException(status.HTTP_409_CONFLICT, "这个操作已经失效")
+    runtime = chat_runtimes.get(task.id)
+    if not runtime:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "聊天任务当前不可恢复")
+    try:
+        await relay.respond_interaction(
+            task.device_id,
+            str(runtime["requestId"]),
+            payload.interactionId,
+            clean_chat_interaction_response(payload.response),
+        )
+    except HostOffline:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "主机连接已断开")
+    task.status = "running"
+    task.interaction_json = None
+    task.updated_at = utcnow()
+    db.commit()
+    db.refresh(task)
+    return chat_task_payload(task)
+
+
+@app.delete("/v1/chat-tasks/{task_id}")
+async def cancel_chat_task(
+    task_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    task = owned_chat_task(task_id, user, db)
+    if task.status in TERMINAL_CHAT_STATUSES:
+        return chat_task_payload(task)
+    runtime = chat_runtimes.get(task.id)
+    if runtime:
+        await relay.cancel_chat(task.device_id, str(runtime["requestId"]))
+        relay.finish_chat(runtime["connection"], str(runtime["requestId"]))
+        consumer = runtime.get("consumer")
+        if isinstance(consumer, asyncio.Task) and not consumer.done():
+            consumer.cancel()
+    task.status = "cancelled"
+    task.interaction_json = None
+    task.updated_at = utcnow()
+    db.commit()
+    db.refresh(task)
+    return chat_task_payload(task)
 
 
 @app.post("/v1/devices/{device_id}/messages")

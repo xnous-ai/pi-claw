@@ -373,6 +373,47 @@ class BackendFlowTest(unittest.TestCase):
                     "type": "chat.cancel",
                     "requestId": cancelled_request["requestId"],
                 })
+                durable_request = json.loads(await websocket.recv())
+                self.assertEqual(durable_request["type"], "chat.request")
+                self.assertEqual(durable_request["requestId"], "task-resume-1")
+                await websocket.send(json.dumps({
+                    "type": "chat.progress",
+                    "requestId": durable_request["requestId"],
+                    "progressId": "durable-progress",
+                    "text": "手机断开后继续执行",
+                }))
+                await websocket.send(json.dumps({
+                    "type": "chat.delta",
+                    "requestId": durable_request["requestId"],
+                    "delta": "后台任务",
+                }))
+                await websocket.send(json.dumps({
+                    "type": "chat.interaction",
+                    "requestId": durable_request["requestId"],
+                    "interactionId": "durable-choice",
+                    "method": "confirm",
+                    "title": "继续执行",
+                }))
+                durable_response = json.loads(await websocket.recv())
+                self.assertEqual(durable_response["type"], "chat.interaction.response")
+                self.assertEqual(durable_response["response"], {"confirmed": True})
+                await websocket.send(json.dumps({
+                    "type": "chat.delta",
+                    "requestId": durable_request["requestId"],
+                    "delta": "已经完成",
+                }))
+                await websocket.send(json.dumps({
+                    "type": "chat.complete",
+                    "requestId": durable_request["requestId"],
+                    "messageId": "durable-reply",
+                    "attachments": [{
+                        "id": "durable-file",
+                        "name": "result.txt",
+                        "mimeType": "text/plain",
+                        "size": 5,
+                        "data": "aGVsbG8=",
+                    }],
+                }))
                 capability_list = json.loads(await websocket.recv())
                 self.assertEqual(capability_list["type"], "capability.list")
                 await websocket.send(json.dumps({
@@ -591,6 +632,57 @@ class BackendFlowTest(unittest.TestCase):
                 self.assertEqual(cancelled["type"], "chat.cancelled")
 
         asyncio.run(cancelled_chat())
+
+        status, durable_task = http_json(
+            f"{self.base}/v1/devices/{device['id']}/chat-tasks",
+            "POST",
+            {
+                "taskId": "task-resume-1",
+                "clientMessageId": "client-resume-1",
+                "conversationId": "conversation-resume",
+                "conversationTitle": "可恢复任务",
+                "createdAt": "2026-08-26T08:00:00Z",
+                "text": "关闭 App 后继续",
+            },
+            token,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(durable_task["status"], "running")
+        for _ in range(50):
+            _, durable_task = http_json(
+                f"{self.base}/v1/chat-tasks/task-resume-1",
+                token=token,
+            )
+            if durable_task["status"] == "waiting":
+                break
+            time.sleep(0.05)
+        self.assertEqual(durable_task["status"], "waiting")
+        self.assertEqual(durable_task["text"], "后台任务")
+        self.assertEqual(durable_task["events"][0]["text"], "手机断开后继续执行")
+        self.assertEqual(durable_task["interaction"]["interactionId"], "durable-choice")
+
+        status, _ = http_json(
+            f"{self.base}/v1/chat-tasks/task-resume-1/interaction",
+            "POST",
+            {
+                "interactionId": "durable-choice",
+                "response": {"confirmed": True},
+            },
+            token,
+        )
+        self.assertEqual(status, 200)
+        for _ in range(50):
+            _, durable_task = http_json(
+                f"{self.base}/v1/chat-tasks/task-resume-1",
+                token=token,
+            )
+            if durable_task["status"] == "completed":
+                break
+            time.sleep(0.05)
+        self.assertEqual(durable_task["status"], "completed")
+        self.assertEqual(durable_task["message"]["text"], "后台任务已经完成")
+        self.assertEqual(durable_task["message"]["attachments"][0]["name"], "result.txt")
+        self.assertEqual(durable_task["message"]["attachments"][0]["data"], "aGVsbG8=")
 
         status, unauthorized = http_json(f"{self.base}/v1/admin/overview")
         self.assertEqual(status, 401)

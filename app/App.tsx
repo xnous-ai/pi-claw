@@ -45,6 +45,7 @@ import {
   releaseDevice,
   removeDeviceCapability,
   scanHostWifiNetworks,
+  resumeAgentMessage,
   streamAgentMessage,
   syncDeviceConversations,
   AgentCancelledError,
@@ -268,8 +269,14 @@ async function syncConversationsFromHosts(
   session: AuthSession,
   localConversations: Conversation[],
 ): Promise<Conversation[]> {
+  const pending = localConversations.filter((conversation) => (
+    conversation.messages.some((message) => message.streaming && message.taskId)
+  ));
+  const pendingIds = new Set(pending.map((conversation) => conversation.id));
   const groups = await Promise.all(session.devices.map(async (device) => {
-    const local = localConversations.filter((item) => item.deviceId === device.id);
+    const local = localConversations.filter((item) => (
+      item.deviceId === device.id && !pendingIds.has(item.id)
+    ));
     if (device.status !== 'online') return local;
     try {
       return local.length
@@ -279,7 +286,8 @@ async function syncConversationsFromHosts(
       return local;
     }
   }));
-  return groups.flat().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  return [...pending, ...groups.flat().filter((item) => !pendingIds.has(item.id))]
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
 function removeConversationFiles(conversation: Conversation) {
@@ -2355,10 +2363,11 @@ function AppContent() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [sending, setSending] = useState(false);
   const activeChat = useRef<AbortController | null>(null);
+  const resumedTaskIds = useRef(new Set<string>());
   const releasedDeviceIds = useRef(new Set<string>());
   const interactionResponders = useRef(new Map<string, {
     answer: (label: string) => void;
-    respond: (response: InteractionResponse) => void;
+    respond: (response: InteractionResponse) => Promise<void>;
   }>());
 
   useEffect(() => {
@@ -2398,6 +2407,19 @@ function AppContent() {
     }
     restore();
   }, []);
+
+  useEffect(() => {
+    if (booting || !session || sending || activeChat.current) return;
+    for (const conversation of conversations) {
+      const pending = conversation.messages.find((message) => (
+        message.streaming && message.taskId
+      ));
+      if (!pending?.taskId || resumedTaskIds.current.has(pending.taskId)) continue;
+      resumedTaskIds.current.add(pending.taskId);
+      void resumePendingMessage(conversation.id, pending.taskId);
+      break;
+    }
+  }, [booting, session?.token, conversations, sending]);
 
   async function updateSession(next: AuthSession) {
     setSession(next);
@@ -2580,13 +2602,143 @@ function AppContent() {
   ) {
     const pendingInteraction = interactionResponders.current.get(interactionId);
     if (!pendingInteraction) return;
-    pendingInteraction.respond(response);
-    pendingInteraction.answer(answer);
-    interactionResponders.current.delete(interactionId);
+    void pendingInteraction.respond(response).then(() => {
+      pendingInteraction.answer(answer);
+      interactionResponders.current.delete(interactionId);
+    }).catch((error) => {
+      Alert.alert('提交失败', errorMessage(error));
+    });
   }
 
   function cancelMessage() {
     activeChat.current?.abort();
+  }
+
+  async function resumePendingMessage(conversationId: string, taskId: string) {
+    if (!session || activeChat.current) return;
+    const original = conversations.find((item) => item.id === conversationId);
+    const messageIndex = original?.messages.findIndex((message) => message.taskId === taskId) ?? -1;
+    if (!original || messageIndex < 0) return;
+    let assistantMessage = original.messages[messageIndex];
+    const activeInteractionIds = new Set<string>();
+
+    function publish() {
+      setConversations((current) => current.map((conversation) => (
+        conversation.id === conversationId
+          ? {
+              ...conversation,
+              updatedAt: new Date().toISOString(),
+              messages: conversation.messages.map((message) => (
+                message.taskId === taskId ? assistantMessage : message
+              )),
+            }
+          : conversation
+      )));
+    }
+
+    async function finish(messages: AgentMessage[], updatedAt = new Date().toISOString()) {
+      const next = conversations
+        .map((conversation) => conversation.id === conversationId
+          ? { ...conversation, updatedAt, messages }
+          : conversation)
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+      setConversations(next);
+      await saveConversations(next);
+    }
+
+    const controller = new AbortController();
+    activeChat.current = controller;
+    setSending(true);
+    try {
+      const reply = await resumeAgentMessage(
+        session.token,
+        taskId,
+        {
+          onDelta: (delta) => {
+            assistantMessage = { ...assistantMessage, text: assistantMessage.text + delta };
+            publish();
+          },
+          onText: (text) => {
+            assistantMessage = { ...assistantMessage, text };
+            publish();
+          },
+          onStatus: (step) => {
+            const steps = assistantMessage.steps ? [...assistantMessage.steps] : [];
+            const index = steps.findIndex((item) => item.id === step.id);
+            if (index >= 0) steps[index] = step;
+            else steps.push(step);
+            assistantMessage = {
+              ...assistantMessage,
+              status: step.state === 'running' ? step.label : assistantMessage.status,
+              steps,
+            };
+            publish();
+          },
+          onInteraction: (interaction, respond) => {
+            activeInteractionIds.add(interaction.id);
+            assistantMessage = { ...assistantMessage, interaction, status: '等待你的选择' };
+            interactionResponders.current.set(interaction.id, {
+              respond,
+              answer: (label) => {
+                if (assistantMessage.interaction?.id !== interaction.id) return;
+                assistantMessage = {
+                  ...assistantMessage,
+                  interaction: { ...assistantMessage.interaction, pending: false, answer: label },
+                  status: '正在继续执行',
+                };
+                publish();
+              },
+            });
+            publish();
+          },
+        },
+        controller.signal,
+      );
+      assistantMessage = {
+        ...assistantMessage,
+        id: reply.id,
+        text: reply.text,
+        createdAt: reply.createdAt,
+        attachments: persistGeneratedAttachments(reply.attachments),
+        status: undefined,
+        streaming: false,
+      };
+      await finish(
+        original.messages.map((message, index) => index === messageIndex ? assistantMessage : message),
+        reply.createdAt,
+      );
+    } catch (resumeError) {
+      const cancelled = resumeError instanceof AgentCancelledError;
+      assistantMessage = {
+        ...assistantMessage,
+        interaction: assistantMessage.interaction
+          ? { ...assistantMessage.interaction, pending: false, answer: cancelled ? '已停止' : undefined }
+          : undefined,
+        status: cancelled ? '已停止运行' : undefined,
+        steps: assistantMessage.steps?.map((step) => (
+          step.state === 'running'
+            ? { ...step, state: cancelled ? 'cancelled' as const : 'error' as const }
+            : step
+        )),
+        streaming: false,
+      };
+      const keepAssistant = cancelled
+        || !!assistantMessage.text
+        || !!assistantMessage.steps?.length
+        || !!assistantMessage.interaction;
+      const messages = original.messages.flatMap((message, index) => {
+        if (index === messageIndex) return keepAssistant ? [assistantMessage] : [];
+        if (!cancelled && index === messageIndex - 1 && message.role === 'user') {
+          return [{ ...message, error: errorMessage(resumeError) }];
+        }
+        return [message];
+      });
+      await finish(messages);
+    } finally {
+      if (activeChat.current === controller) activeChat.current = null;
+      activeInteractionIds.forEach((id) => interactionResponders.current.delete(id));
+      setSending(false);
+    }
   }
 
   async function sendMessage(
@@ -2609,6 +2761,7 @@ function AppContent() {
     const title = original.title === '新会话' ? titleSource.slice(0, 22) : original.title;
     let assistantMessage: AgentMessage = {
       id: createLocalId('assistant-pending'),
+      taskId: userMessage.id,
       role: 'assistant',
       text: '',
       createdAt: userMessage.createdAt,
@@ -2631,11 +2784,16 @@ function AppContent() {
       } : item));
     }
 
-    setConversations((current) => current.map((item) => item.id === conversationId ? pendingConversation : item));
+    const pendingConversations = conversations.map((item) => (
+      item.id === conversationId ? pendingConversation : item
+    ));
+    setConversations(pendingConversations);
     const controller = new AbortController();
     activeChat.current = controller;
+    resumedTaskIds.current.add(userMessage.id);
     setSending(true);
     try {
+      await saveConversations(pendingConversations);
       try {
         const reply = await streamAgentMessage(
           session.token,
@@ -2649,6 +2807,10 @@ function AppContent() {
           {
             onDelta: (delta) => {
               assistantMessage = { ...assistantMessage, text: assistantMessage.text + delta };
+              publish();
+            },
+            onText: (nextText) => {
+              assistantMessage = { ...assistantMessage, text: nextText };
               publish();
             },
             onStatus: (step: AgentStep) => {

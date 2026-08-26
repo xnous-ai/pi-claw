@@ -2070,7 +2070,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pi-provider", default=os.getenv("CLAWPI_PI_PROVIDER") or None)
     parser.add_argument("--pi-model", default=os.getenv("CLAWPI_PI_MODEL") or None)
     parser.add_argument("--pi-thinking", default=os.getenv("CLAWPI_PI_THINKING") or None)
-    parser.add_argument("--agent-timeout", type=int, default=600)
+    parser.add_argument("--agent-timeout", type=int, default=3600)
     return parser.parse_args()
 
 

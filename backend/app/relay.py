@@ -108,11 +108,14 @@ class Relay:
         conversation_title: str = "",
         client_message_id: str = "",
         created_at: str = "",
+        request_id: str | None = None,
     ) -> tuple[HostConnection, str, PendingRequest]:
         connection = self._hosts.get(device_id)
         if not connection:
             raise HostOffline
-        request_id = str(uuid4())
+        request_id = request_id or str(uuid4())
+        if request_id in connection.pending:
+            raise RuntimeError("聊天任务已经在运行")
         pending = PendingRequest(
             asyncio.get_running_loop().create_future(),
             events=asyncio.Queue() if stream else None,

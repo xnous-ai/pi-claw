@@ -36,6 +36,7 @@ export type AuthSession = {
 
 export type AgentMessage = {
   id: string;
+  taskId?: string;
   role: 'assistant' | 'user';
   text: string;
   createdAt: string;
@@ -99,11 +100,22 @@ export type InteractionResponse = {
 
 export type AgentStreamHandlers = {
   onDelta: (delta: string) => void;
+  onText?: (text: string) => void;
   onInteraction: (
     interaction: AgentInteraction,
-    respond: (response: InteractionResponse) => void,
+    respond: (response: InteractionResponse) => Promise<void>,
   ) => void;
   onStatus: (step: AgentStep) => void;
+};
+
+type AgentTaskSnapshot = {
+  taskId: string;
+  status: 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled';
+  text: string;
+  events: Record<string, unknown>[];
+  interaction?: Record<string, unknown> | null;
+  message?: AgentStreamMessage | null;
+  error?: string | null;
 };
 
 export type Conversation = {
@@ -740,7 +752,7 @@ export async function streamAgentMessage(
   if (isDemoMode) {
     handlers.onStatus({ id: 'demo', label: '正在整理回复', state: 'running' });
     await delay(350);
-    handlers.onDelta('已收到你的消息。');
+    handlers.onText?.('已收到你的消息。');
     handlers.onStatus({ id: 'demo', label: '回复已生成', state: 'done' });
     return {
       id: `assistant-${Date.now()}`,
@@ -750,168 +762,173 @@ export async function streamAgentMessage(
     };
   }
 
-  const websocketUrl = `${API_URL!.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:')}/v1/chat/ws`;
-  return new Promise<AgentStreamMessage>((resolve, reject) => {
-    const socket = new WebSocket(websocketUrl);
-    let accumulated = '';
-    let settled = false;
-    let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
-    const connectionTimer = setTimeout(() => {
-      finishWithError('连接聊天服务超时');
-    }, 15_000);
-
-    function close() {
-      clearTimeout(connectionTimer);
-      if (heartbeatTimer) clearInterval(heartbeatTimer);
-      signal?.removeEventListener('abort', abort);
-      if (socket.readyState === 0 || socket.readyState === 1) socket.close();
-    }
-
-    function abort() {
-      if (settled) return;
-      if (socket.readyState === 1) {
-        socket.send(JSON.stringify({ type: 'chat.cancel' }));
-      }
-      finishCancelled();
-    }
-
-    function finishCancelled() {
-      if (settled) return;
-      settled = true;
-      close();
-      reject(new AgentCancelledError());
-    }
-
-    function finishWithError(message: string) {
-      if (settled) return;
-      settled = true;
-      close();
-      reject(new Error(message));
-    }
-
-    socket.onopen = () => {
-      socket.send(JSON.stringify({ type: 'auth', token }));
-    };
-    socket.onerror = () => finishWithError('无法连接聊天服务');
-    socket.onclose = () => {
-      if (!settled) finishWithError('聊天连接已断开');
-    };
-    socket.onmessage = (event) => {
-      let payload: Record<string, any>;
-      try {
-        payload = JSON.parse(String(event.data));
-      } catch {
-        finishWithError('聊天服务返回了无效数据');
-        return;
-      }
-      if (payload.type === 'chat.ready') {
-        clearTimeout(connectionTimer);
-        heartbeatTimer = setInterval(() => {
-          if (socket.readyState === 1) socket.send(JSON.stringify({ type: 'heartbeat' }));
-        }, 20_000);
-        socket.send(JSON.stringify({
-          type: 'chat.start',
+  const taskId = clientMessageId;
+  if (signal?.aborted) throw new AgentCancelledError();
+  try {
+    await request<AgentTaskSnapshot>(
+      `/v1/devices/${encodeURIComponent(deviceId)}/chat-tasks`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          taskId,
           clientMessageId,
-          deviceId,
           conversationId,
           conversationTitle,
           createdAt,
           text,
           attachments,
-        }));
-      } else if (payload.type === 'chat.delta') {
-        const delta = String(payload.delta || '');
-        accumulated += delta;
-        if (delta) handlers.onDelta(delta);
-      } else if (payload.type === 'chat.progress') {
-        const progress = String(payload.text || '').trim();
-        if (progress) {
+        }),
+      },
+      token,
+      30_000,
+    );
+  } catch (startError) {
+    if (startError instanceof ApiError) throw startError;
+    let recovered = false;
+    for (let attempt = 0; attempt < 10 && !signal?.aborted; attempt += 1) {
+      try {
+        await request<AgentTaskSnapshot>(
+          `/v1/chat-tasks/${encodeURIComponent(taskId)}`,
+          { method: 'GET' },
+          token,
+          5_000,
+        );
+        recovered = true;
+        break;
+      } catch (recoveryError) {
+        if (recoveryError instanceof ApiError) throw startError;
+        await delay(1_000);
+      }
+    }
+    if (!recovered) throw startError;
+  }
+  if (signal?.aborted) {
+    await request<AgentTaskSnapshot>(
+      `/v1/chat-tasks/${encodeURIComponent(taskId)}`,
+      { method: 'DELETE' },
+      token,
+    ).catch(() => undefined);
+    throw new AgentCancelledError();
+  }
+  return watchAgentTask(token, taskId, handlers, signal);
+}
+
+export async function resumeAgentMessage(
+  token: string,
+  taskId: string,
+  handlers: AgentStreamHandlers,
+  signal?: AbortSignal,
+): Promise<AgentStreamMessage> {
+  if (isDemoMode) throw new Error('演示模式没有可恢复的任务');
+  return watchAgentTask(token, taskId, handlers, signal);
+}
+
+async function watchAgentTask(
+  token: string,
+  taskId: string,
+  handlers: AgentStreamHandlers,
+  signal?: AbortSignal,
+): Promise<AgentStreamMessage> {
+  let previousText = '';
+  let interactionId = '';
+
+  while (true) {
+    if (signal?.aborted) {
+      await request<AgentTaskSnapshot>(
+        `/v1/chat-tasks/${encodeURIComponent(taskId)}`,
+        { method: 'DELETE' },
+        token,
+      ).catch(() => undefined);
+      throw new AgentCancelledError();
+    }
+
+    let task: AgentTaskSnapshot;
+    try {
+      task = await request<AgentTaskSnapshot>(
+        `/v1/chat-tasks/${encodeURIComponent(taskId)}`,
+        { method: 'GET' },
+        token,
+        15_000,
+      );
+    } catch (error) {
+      if (error instanceof ApiError && (error.status === 401 || error.status === 404)) throw error;
+      await delay(2_000);
+      continue;
+    }
+
+    const nextText = String(task.text || '');
+    if (nextText !== previousText) {
+      if (handlers.onText) handlers.onText(nextText);
+      else if (nextText.startsWith(previousText)) handlers.onDelta(nextText.slice(previousText.length));
+      previousText = nextText;
+    }
+    for (const event of Array.isArray(task.events) ? task.events : []) {
+      if (event.type === 'chat.progress') {
+        const label = String(event.text || '').trim();
+        if (label) {
           handlers.onStatus({
-            id: String(payload.progressId || `progress-${Date.now()}`),
+            id: String(event.progressId || `progress-${Date.now()}`),
             kind: 'text',
-            label: progress,
+            label,
             state: 'done',
           });
         }
-      } else if (payload.type === 'chat.status') {
-        const state = ['running', 'done', 'error'].includes(payload.state)
-          ? payload.state as AgentStep['state']
+      } else if (event.type === 'chat.status') {
+        const state = ['running', 'done', 'error'].includes(String(event.state))
+          ? event.state as AgentStep['state']
           : 'running';
         handlers.onStatus({
-          id: String(payload.statusId || `status-${Date.now()}`),
+          id: String(event.statusId || `status-${Date.now()}`),
           kind: 'tool',
-          label: String(payload.label || '正在处理'),
+          label: String(event.label || '正在处理'),
           state,
         });
-      } else if (payload.type === 'chat.interaction') {
-        const supportedMethods = ['select', 'confirm', 'input', 'editor'] as const;
-        const method = supportedMethods.includes(payload.method)
-          ? payload.method as AgentInteraction['method']
-          : 'select';
-        handlers.onInteraction(
-          {
-            id: String(payload.interactionId || ''),
-            method,
-            title: String(payload.title || '需要你的确认'),
-            message: String(payload.message || ''),
-            options: Array.isArray(payload.options)
-              ? payload.options.map(String).slice(0, 8)
-              : [],
-            placeholder: String(payload.placeholder || ''),
-            pending: true,
-          },
-          (response) => {
-            if (socket.readyState !== 1 || !payload.requestId) return;
-            socket.send(JSON.stringify({
-              type: 'chat.interaction.response',
-              requestId: payload.requestId,
-              interactionId: payload.interactionId,
-              response,
-            }));
-          },
-        );
-      } else if (payload.type === 'chat.complete') {
-        const message = payload.message || {};
-        const finalText = String(message.text || accumulated);
-        let totalAttachmentSize = 0;
-        const responseAttachments: ChatAttachmentTransfer[] = [];
-        if (Array.isArray(message.attachments)) {
-          for (const item of message.attachments.slice(0, 3)) {
-            const size = Number(item?.size);
-            const name = String(item?.name || '').trim();
-            const data = typeof item?.data === 'string' ? item.data : '';
-            if (!name || !data || !Number.isInteger(size) || size <= 0 || size > 4 * 1024 * 1024) continue;
-            if (totalAttachmentSize + size > 6 * 1024 * 1024) continue;
-            responseAttachments.push({
-              id: String(item.id || `generated-${Date.now()}-${responseAttachments.length}`),
-              name,
-              mimeType: String(item.mimeType || 'application/octet-stream'),
-              size,
-              data,
-            });
-            totalAttachmentSize += size;
-          }
-        }
-        if (!message.id || (!finalText && !responseAttachments.length)) {
-          finishWithError('Agent 服务返回了无效消息');
-          return;
-        }
-        settled = true;
-        close();
-        resolve({
-          id: String(message.id),
-          role: 'assistant',
-          text: finalText,
-          createdAt: String(message.createdAt || new Date().toISOString()),
-          attachments: responseAttachments,
-        });
-      } else if (payload.type === 'chat.cancelled') {
-        finishCancelled();
-      } else if (payload.type === 'chat.error' || payload.type === 'auth.error') {
-        finishWithError(String(payload.message || 'Agent 执行失败'));
       }
-    };
-    signal?.addEventListener('abort', abort, { once: true });
-    if (signal?.aborted) abort();
-  });
+    }
+
+    const interaction = task.interaction;
+    const nextInteractionId = String(interaction?.interactionId || '');
+    if (task.status === 'waiting' && nextInteractionId && nextInteractionId !== interactionId) {
+      interactionId = nextInteractionId;
+      const supportedMethods = ['select', 'confirm', 'input', 'editor'] as const;
+      const methodValue = String(interaction?.method || 'select');
+      const method = supportedMethods.includes(methodValue as AgentInteraction['method'])
+        ? methodValue as AgentInteraction['method']
+        : 'select';
+      handlers.onInteraction(
+        {
+          id: nextInteractionId,
+          method,
+          title: String(interaction?.title || '需要你的确认'),
+          message: String(interaction?.message || ''),
+          options: Array.isArray(interaction?.options)
+            ? interaction.options.map(String).slice(0, 8)
+            : [],
+          placeholder: String(interaction?.placeholder || ''),
+          pending: true,
+        },
+        async (response) => {
+          await request<AgentTaskSnapshot>(
+            `/v1/chat-tasks/${encodeURIComponent(taskId)}/interaction`,
+            {
+              method: 'POST',
+              body: JSON.stringify({ interactionId: nextInteractionId, response }),
+            },
+            token,
+          );
+        },
+      );
+    }
+
+    if (task.status === 'completed') {
+      const message = task.message;
+      if (!message?.id || (!message.text && !message.attachments?.length)) {
+        throw new Error('Agent 服务返回了无效消息');
+      }
+      return message;
+    }
+    if (task.status === 'failed') throw new Error(task.error || 'Agent 执行失败');
+    if (task.status === 'cancelled') throw new AgentCancelledError();
+    await delay(1_000);
+  }
 }
