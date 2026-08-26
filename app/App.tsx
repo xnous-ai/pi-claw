@@ -1106,9 +1106,11 @@ function ChatScreen({
       />
       <ScrollView
         contentContainerStyle={styles.messageList}
+        keyboardDismissMode="on-drag"
         keyboardShouldPersistTaps="handled"
         ref={scrollRef}
         showsVerticalScrollIndicator={false}
+        style={styles.messageScroller}
       >
         <Text style={styles.dateDividerText}>今天</Text>
         {conversation.messages.map((message) => (
@@ -2397,6 +2399,7 @@ const styles = StyleSheet.create({
   emptyTitle: { color: colors.ink, fontSize: 21, fontWeight: '800', marginTop: 20, textAlign: 'center' },
   emptyText: { color: colors.muted, fontSize: 14, lineHeight: 21, marginBottom: 24, marginTop: 8, textAlign: 'center' },
   messageList: { flexGrow: 1, paddingBottom: 22, paddingHorizontal: 16, paddingTop: 16 },
+  messageScroller: { flex: 1 },
   dateDividerText: { color: colors.subtle, fontSize: 12, marginBottom: 20, textAlign: 'center' },
   messageGroup: { marginBottom: 16 },
   messageRow: { alignItems: 'flex-end', flexDirection: 'row' },
