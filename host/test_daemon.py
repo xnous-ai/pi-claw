@@ -19,6 +19,7 @@ from daemon import (
     PiRpcAgent,
     ProvisioningServer,
     apply_agent_config,
+    chat_prompt,
     connect_wifi,
     cpu_usage_percent,
     discover_capabilities,
@@ -37,6 +38,7 @@ from daemon import (
     run_nmcli,
     run_host,
     save_agent_config,
+    save_chat_attachments,
     scan_wifi_networks,
     start_hotspot,
     stop_hotspot,
@@ -167,6 +169,27 @@ class PiRpcAgentTest(unittest.TestCase):
             ),
             "完成",
         )
+
+    def test_saves_chat_attachment_inside_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            saved = save_chat_attachments(
+                workspace,
+                "conversation-1",
+                [{
+                    "name": "../报告.txt",
+                    "mimeType": "text/plain",
+                    "size": 5,
+                    "data": "aGVsbG8=",
+                }],
+            )
+            path = saved[0]["path"]
+            self.assertTrue(path.is_relative_to(workspace))
+            self.assertEqual(path.read_text(encoding="utf-8"), "hello")
+            self.assertNotIn("..", path.name)
+            prompt = chat_prompt("总结内容", saved)
+            self.assertIn(path.name, prompt)
+            self.assertIn("总结内容", prompt)
 
     def test_does_not_echo_user_message_when_provider_rejects_key(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

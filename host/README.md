@@ -37,6 +37,8 @@ App 的主机详情会实时读取 CPU、内存和根分区硬盘占用，并扫
 
 安装脚本还会部署内置的 `ask_user` Pi 工具。Agent 调用该工具时，App 会显示选择按钮，并把答案送回同一个 Pi RPC 会话继续执行。
 
+聊天支持每条消息最多 3 个附件，单个不超过 4 MB、合计不超过 6 MB。附件内容经聊天 WebSocket 实时转发，云端不落盘；主机校验后保存到 `/var/lib/clawpi/workspace/.clawpi/attachments` 下对应的 Pi 会话目录，并把本机路径交给 Agent 读取。
+
 ## 模拟器
 
 先启动 `backend/`，然后在仓库根目录运行：

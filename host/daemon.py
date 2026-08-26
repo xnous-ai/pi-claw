@@ -1,5 +1,7 @@
 import argparse
 import asyncio
+import base64
+import binascii
 import contextlib
 import hashlib
 import io
@@ -59,6 +61,9 @@ PROVIDER_CATALOG = [
     ("xiaomi-token-plan-ams", "Xiaomi Token Plan Amsterdam", "XIAOMI_TOKEN_PLAN_AMS_API_KEY"),
     ("xiaomi-token-plan-sgp", "Xiaomi Token Plan Singapore", "XIAOMI_TOKEN_PLAN_SGP_API_KEY"),
 ]
+
+MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024
+MAX_ATTACHMENTS_BYTES = 6 * 1024 * 1024
 PROVIDER_API_KEY_ENV = {provider: env for provider, _, env in PROVIDER_CATALOG}
 
 
@@ -955,6 +960,67 @@ async def handle_system_status(websocket, message: dict) -> None:
         )
 
 
+def save_chat_attachments(
+    workspace: Path,
+    conversation_id: str,
+    attachments: object,
+) -> list[dict]:
+    if attachments is None:
+        return []
+    if not isinstance(attachments, list) or len(attachments) > 3:
+        raise ValueError("附件数量无效")
+    directory = workspace / ".clawpi" / "attachments" / PiRpcAgent.session_id(conversation_id)
+    saved = []
+    total_size = 0
+    for item in attachments:
+        if not isinstance(item, dict):
+            raise ValueError("附件格式无效")
+        try:
+            data = base64.b64decode(str(item.get("data") or ""), validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError("附件内容无效")
+        if not data or len(data) > MAX_ATTACHMENT_BYTES:
+            raise ValueError("单个附件不能超过 4 MB")
+        total_size += len(data)
+        if total_size > MAX_ATTACHMENTS_BYTES:
+            raise ValueError("附件总大小不能超过 6 MB")
+        original_name = str(item.get("name") or "attachment").replace("\\", "/").rsplit("/", 1)[-1]
+        safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", original_name).strip(" .")[:120]
+        if not safe_name:
+            safe_name = "attachment"
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{uuid4().hex[:8]}-{safe_name}"
+        path.write_bytes(data)
+        if os.name != "nt":
+            directory.chmod(0o700)
+            path.chmod(0o600)
+        saved.append(
+            {
+                "name": original_name[:200],
+                "mimeType": str(item.get("mimeType") or "application/octet-stream")[:200],
+                "size": len(data),
+                "path": path,
+            }
+        )
+    return saved
+
+
+def chat_prompt(text: str, attachments: list[dict]) -> str:
+    if not attachments:
+        return text
+    lines = ["用户上传了以下附件，文件已保存在本机。请根据任务需要读取："]
+    for item in attachments:
+        lines.append(
+            f"- {json.dumps(str(item['path']), ensure_ascii=False)} "
+            f"({item['mimeType']}, {item['size']} bytes)"
+        )
+    if text.strip():
+        lines.extend(("", "用户消息：", text))
+    else:
+        lines.extend(("", "请查看并处理这些附件。"))
+    return "\n".join(lines)
+
+
 async def handle_chat(
     websocket,
     message: dict,
@@ -967,7 +1033,15 @@ async def handle_chat(
     session_id = agent.session_id(conversation_id) if conversation_id else "unknown"
     started_at = time.monotonic()
     try:
-        if not request_id or not conversation_id or not message.get("text"):
+        text = str(message.get("text") or "")
+        if not request_id or not conversation_id:
+            raise ValueError("聊天请求无效")
+        attachments = save_chat_attachments(
+            agent.workspace,
+            conversation_id,
+            message.get("attachments"),
+        )
+        if not text.strip() and not attachments:
             raise ValueError("聊天请求无效")
         print(
             f"收到聊天请求：request={request_id} session={session_id} "
@@ -983,7 +1057,7 @@ async def handle_chat(
 
             async for delta in agent.stream(
                 conversation_id,
-                str(message["text"]),
+                chat_prompt(text, attachments),
                 on_event=forward_event,
                 interactions=interactions,
             ):
@@ -1407,6 +1481,7 @@ async def run_host(
             async with connect(
                 websocket_url(server, credentials["deviceId"]),
                 additional_headers={"Authorization": f"Bearer {credentials['hostToken']}"},
+                max_size=12 * 1024 * 1024,
             ) as websocket:
                 delay = 1
                 heartbeat_task = asyncio.create_task(heartbeat(websocket))

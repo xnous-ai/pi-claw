@@ -285,6 +285,8 @@ class BackendFlowTest(unittest.TestCase):
                 )
                 stream_request = json.loads(await websocket.recv())
                 self.assertEqual(stream_request["type"], "chat.request")
+                self.assertEqual(stream_request["attachments"][0]["name"], "notes.txt")
+                self.assertEqual(stream_request["attachments"][0]["data"], "aGVsbG8=")
                 await websocket.send(json.dumps({
                     "type": "chat.progress",
                     "requestId": stream_request["requestId"],
@@ -466,6 +468,13 @@ class BackendFlowTest(unittest.TestCase):
                     "deviceId": device["id"],
                     "conversationId": "conversation-stream",
                     "text": "请执行任务",
+                    "attachments": [{
+                        "id": "attachment-1",
+                        "name": "notes.txt",
+                        "mimeType": "text/plain",
+                        "size": 5,
+                        "data": "aGVsbG8=",
+                    }],
                 }))
                 while True:
                     event = json.loads(await websocket.recv())

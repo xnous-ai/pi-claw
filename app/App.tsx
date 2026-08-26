@@ -1,5 +1,7 @@
 import { SymbolView, type AndroidSymbol } from 'expo-symbols';
 import { StatusBar as ExpoStatusBar } from 'expo-status-bar';
+import * as DocumentPicker from 'expo-document-picker';
+import { File } from 'expo-file-system';
 import { useEffect, useRef, useState } from 'react';
 import {
   KeyboardAvoidingView as KeyboardControllerAvoidingView,
@@ -9,6 +11,7 @@ import {
   ActivityIndicator,
   Alert,
   BackHandler,
+  Keyboard,
   KeyboardAvoidingView,
   Linking,
   Pressable,
@@ -50,6 +53,8 @@ import {
   type AgentMessage,
   type AuthSession,
   type Conversation,
+  type ChatAttachment,
+  type ChatAttachmentUpload,
   type Device,
   type DeviceCapability,
   type DeviceProvisioning,
@@ -65,6 +70,7 @@ import {
 } from './src/session';
 
 type MainTab = 'conversations' | 'devices' | 'profile';
+type PendingAttachment = ChatAttachment & { uri: string };
 type ProfilePage = 'account' | 'support' | 'terms' | 'privacy' | 'about';
 type Route =
   | { name: 'root' }
@@ -1062,10 +1068,12 @@ function ChatScreen({
   onCancel: () => void;
   onLoadCommands: () => Promise<AgentCommand[]>;
   onRespondInteraction: (interactionId: string, response: InteractionResponse, answer: string) => void;
-  onSend: (text: string) => Promise<void>;
+  onSend: (text: string, attachments: ChatAttachmentUpload[]) => Promise<void>;
 }) {
   const [draft, setDraft] = useState('');
   const [error, setError] = useState('');
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const [preparing, setPreparing] = useState(false);
   const [commands, setCommands] = useState<AgentCommand[]>([]);
   const [commandsLoading, setCommandsLoading] = useState(false);
   const inputRef = useRef<TextInput>(null);
@@ -1081,21 +1089,73 @@ function ChatScreen({
     return () => { mounted = false; };
   }, [device.id]);
 
+  function scrollToLatest(animated = true) {
+    requestAnimationFrame(() => scrollRef.current?.scrollToEnd({ animated }));
+  }
+
   useEffect(() => {
-    const timer = setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 80);
+    const timer = setTimeout(() => scrollToLatest(true), 80);
     return () => clearTimeout(timer);
   }, [conversation.messages, sending]);
 
-  async function submit() {
-    const text = draft.trim();
-    if (!text || sending) return;
-    setDraft('');
+  useEffect(() => {
+    const subscription = Keyboard.addListener('keyboardDidShow', () => {
+      setTimeout(() => scrollToLatest(true), 80);
+    });
+    return () => subscription.remove();
+  }, []);
+
+  async function pickAttachments() {
+    if (sending || preparing) return;
     setError('');
     try {
-      await onSend(text);
+      const result = await DocumentPicker.getDocumentAsync({
+        copyToCacheDirectory: true,
+        multiple: true,
+        type: '*/*',
+      });
+      if (result.canceled) return;
+      if (attachments.length + result.assets.length > 3) {
+        return Alert.alert('附件过多', '每条消息最多添加 3 个附件。');
+      }
+      const selected = result.assets.map((asset, index) => ({
+        id: `attachment-${Date.now()}-${index}`,
+        name: asset.name,
+        mimeType: asset.mimeType || 'application/octet-stream',
+        size: asset.size ?? new File(asset.uri).size,
+        uri: asset.uri,
+      }));
+      if (selected.some((item) => item.size <= 0 || item.size > 4 * 1024 * 1024)) {
+        return Alert.alert('附件太大', '单个附件不能超过 4 MB。');
+      }
+      if ([...attachments, ...selected].reduce((total, item) => total + item.size, 0) > 6 * 1024 * 1024) {
+        return Alert.alert('附件太大', '每条消息的附件合计不能超过 6 MB。');
+      }
+      setAttachments((current) => [...current, ...selected]);
+      scrollToLatest(false);
+    } catch (pickError) {
+      setError(errorMessage(pickError));
+    }
+  }
+
+  async function submit() {
+    const text = draft.trim();
+    if ((!text && !attachments.length) || sending || preparing) return;
+    setError('');
+    setPreparing(true);
+    try {
+      const uploads = await Promise.all(attachments.map(async ({ uri, ...attachment }) => ({
+        ...attachment,
+        data: await new File(uri).base64(),
+      })));
+      setDraft('');
+      setAttachments([]);
+      setPreparing(false);
+      await onSend(text, uploads);
     } catch (requestError) {
-      setDraft(text);
       setError(errorMessage(requestError));
+    } finally {
+      setPreparing(false);
     }
   }
 
@@ -1131,6 +1191,7 @@ function ChatScreen({
         ref={scrollRef}
         showsVerticalScrollIndicator={false}
         style={styles.messageScroller}
+        onContentSizeChange={() => scrollToLatest(false)}
       >
         <Text style={styles.dateDividerText}>今天</Text>
         {conversation.messages.map((message) => (
@@ -1138,7 +1199,20 @@ function ChatScreen({
             {message.role === 'user' ? (
               <View style={[styles.messageRow, styles.userMessageRow]}>
                 <View style={[styles.messageBubble, styles.userBubble]}>
-                  <Text style={styles.userMessageText}>{message.text}</Text>
+                  {!!message.attachments?.length && (
+                    <View style={styles.messageAttachments}>
+                      {message.attachments.map((attachment) => (
+                        <View key={attachment.id} style={styles.messageAttachmentRow}>
+                          <Icon color={colors.surface} name="attach_file" size={17} />
+                          <View style={styles.messageAttachmentCopy}>
+                            <Text numberOfLines={1} style={styles.messageAttachmentName}>{attachment.name}</Text>
+                            <Text style={styles.messageAttachmentSize}>{formatBytes(attachment.size)}</Text>
+                          </View>
+                        </View>
+                      ))}
+                    </View>
+                  )}
+                  {!!message.text && <Text style={styles.userMessageText}>{message.text}</Text>}
                   <Text style={styles.userTime}>{formatTime(message.createdAt)}</Text>
                 </View>
               </View>
@@ -1196,32 +1270,78 @@ function ChatScreen({
           )}
         </View>
       )}
-      <View style={styles.composerWrap}>
-        <TextInput
-          accessibilityLabel="消息输入框"
-          editable={!sending && device.status === 'online'}
-          multiline
-          onChangeText={setDraft}
-          placeholder={device.status === 'online' ? '发送消息' : '主机离线'}
-          placeholderTextColor={colors.subtle}
-          ref={inputRef}
-          style={styles.composerInput}
-          value={draft}
-        />
-        <Pressable
-          accessibilityLabel={sending ? '停止运行' : '发送消息'}
-          accessibilityRole="button"
-          disabled={!sending && (!draft.trim() || device.status !== 'online')}
-          onPress={sending ? onCancel : submit}
-          style={({ pressed }) => [
-            styles.sendButton,
-            sending && styles.stopButton,
-            (!sending && (!draft.trim() || device.status !== 'online')) && styles.sendButtonDisabled,
-            pressed && styles.pressed,
-          ]}
-        >
-          <Icon color={colors.surface} name={sending ? 'stop' : 'send'} size={22} />
-        </Pressable>
+      <View onLayout={() => scrollToLatest(false)} style={styles.composerWrap}>
+        {!!attachments.length && (
+          <ScrollView
+            contentContainerStyle={styles.pendingAttachments}
+            horizontal
+            keyboardShouldPersistTaps="handled"
+            showsHorizontalScrollIndicator={false}
+          >
+            {attachments.map((attachment) => (
+              <View key={attachment.id} style={styles.pendingAttachment}>
+                <Icon color={colors.accent} name="attach_file" size={17} />
+                <View style={styles.pendingAttachmentCopy}>
+                  <Text numberOfLines={1} style={styles.pendingAttachmentName}>{attachment.name}</Text>
+                  <Text style={styles.pendingAttachmentSize}>{formatBytes(attachment.size)}</Text>
+                </View>
+                <Pressable
+                  accessibilityLabel={`移除附件 ${attachment.name}`}
+                  accessibilityRole="button"
+                  onPress={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))}
+                  hitSlop={8}
+                  style={({ pressed }) => [styles.pendingRemoveButton, pressed && styles.pressed]}
+                >
+                  <Icon color={colors.subtle} name="close" size={18} />
+                </Pressable>
+              </View>
+            ))}
+          </ScrollView>
+        )}
+        <View style={styles.composerRow}>
+          <Pressable
+            accessibilityLabel="添加附件"
+            accessibilityRole="button"
+            disabled={sending || preparing || device.status !== 'online'}
+            onPress={pickAttachments}
+            style={({ pressed }) => [
+              styles.attachButton,
+              (sending || preparing || device.status !== 'online') && styles.sendButtonDisabled,
+              pressed && styles.pressed,
+            ]}
+          >
+            <Icon color={colors.muted} name="attach_file" size={23} />
+          </Pressable>
+          <TextInput
+            accessibilityLabel="消息输入框"
+            editable={!sending && !preparing && device.status === 'online'}
+            multiline
+            onChangeText={setDraft}
+            placeholder={device.status === 'online' ? '发送消息' : '主机离线'}
+            placeholderTextColor={colors.subtle}
+            ref={inputRef}
+            style={styles.composerInput}
+            value={draft}
+          />
+          <Pressable
+            accessibilityLabel={sending ? '停止运行' : preparing ? '正在读取附件' : '发送消息'}
+            accessibilityRole="button"
+            disabled={!sending && (preparing || (!draft.trim() && !attachments.length) || device.status !== 'online')}
+            onPress={sending ? onCancel : submit}
+            style={({ pressed }) => [
+              styles.sendButton,
+              sending && styles.stopButton,
+              (!sending && (preparing || (!draft.trim() && !attachments.length) || device.status !== 'online')) && styles.sendButtonDisabled,
+              pressed && styles.pressed,
+            ]}
+          >
+            {preparing ? (
+              <ActivityIndicator color={colors.surface} size="small" />
+            ) : (
+              <Icon color={colors.surface} name={sending ? 'stop' : 'send'} size={22} />
+            )}
+          </Pressable>
+        </View>
       </View>
     </KeyboardControllerAvoidingView>
   );
@@ -1860,7 +1980,7 @@ function MainScreen({
   onRefreshDevice: (deviceId: string) => Promise<void>;
   onReleaseDevice: (deviceId: string) => Promise<void>;
   onRespondInteraction: (interactionId: string, response: InteractionResponse, answer: string) => void;
-  onSend: (conversationId: string, text: string) => Promise<void>;
+  onSend: (conversationId: string, text: string, attachments: ChatAttachmentUpload[]) => Promise<void>;
   onSignOut: () => void;
 }) {
   const [tab, setTab] = useState<MainTab>('conversations');
@@ -1918,7 +2038,7 @@ function MainScreen({
         onCancel={onCancel}
         onLoadCommands={() => onLoadCommands(device.id)}
         onRespondInteraction={onRespondInteraction}
-        onSend={(text) => onSend(conversation.id, text)}
+        onSend={(text, attachments) => onSend(conversation.id, text, attachments)}
         sending={sending}
       />
     ) : null;
@@ -2185,7 +2305,11 @@ function AppContent() {
     activeChat.current?.abort();
   }
 
-  async function sendMessage(conversationId: string, text: string) {
+  async function sendMessage(
+    conversationId: string,
+    text: string,
+    attachments: ChatAttachmentUpload[],
+  ) {
     if (!session || sending) return;
     const original = conversations.find((item) => item.id === conversationId);
     if (!original) return;
@@ -2195,8 +2319,10 @@ function AppContent() {
       role: 'user',
       text,
       createdAt: new Date().toISOString(),
+      attachments: attachments.map(({ data: _data, ...attachment }) => attachment),
     };
-    const title = original.title === '新会话' ? text.slice(0, 22) : original.title;
+    const titleSource = text.trim() || attachments[0]?.name || '附件';
+    const title = original.title === '新会话' ? titleSource.slice(0, 22) : original.title;
     let assistantMessage: AgentMessage = {
       id: `assistant-pending-${Date.now()}`,
       role: 'assistant',
@@ -2232,6 +2358,7 @@ function AppContent() {
           original.deviceId,
           conversationId,
           text,
+          attachments,
           {
             onDelta: (delta) => {
               assistantMessage = { ...assistantMessage, text: assistantMessage.text + delta };
@@ -2517,6 +2644,11 @@ const styles = StyleSheet.create({
   userBubble: { backgroundColor: colors.ink, borderBottomRightRadius: 2 },
   agentMessageText: { color: colors.ink, fontSize: 15, lineHeight: 22 },
   userMessageText: { color: colors.surface, fontSize: 15, lineHeight: 22 },
+  messageAttachments: { marginBottom: 7 },
+  messageAttachmentRow: { alignItems: 'center', backgroundColor: '#28364A', borderRadius: 6, flexDirection: 'row', marginBottom: 5, minHeight: 44, paddingHorizontal: 9, paddingVertical: 6 },
+  messageAttachmentCopy: { flex: 1, marginLeft: 7, minWidth: 0 },
+  messageAttachmentName: { color: colors.surface, fontSize: 12, fontWeight: '700' },
+  messageAttachmentSize: { color: '#C6D0E0', fontSize: 10, marginTop: 2 },
   agentTime: { color: colors.subtle, fontSize: 10, marginTop: 6 },
   userTime: { color: '#C6D0E0', fontSize: 10, marginTop: 6, textAlign: 'right' },
   messageError: { alignItems: 'flex-start', alignSelf: 'flex-end', flexDirection: 'row', marginTop: 6, maxWidth: '79%' },
@@ -2553,7 +2685,15 @@ const styles = StyleSheet.create({
   commandDescription: { color: colors.muted, flex: 1, fontSize: 12, marginLeft: 10, marginRight: 8 },
   commandSource: { color: colors.subtle, fontSize: 11 },
   commandEmpty: { color: colors.subtle, fontSize: 13, lineHeight: 20, minHeight: 52, paddingHorizontal: 4, paddingVertical: 16 },
-  composerWrap: { alignItems: 'flex-end', backgroundColor: colors.surface, borderTopColor: colors.line, borderTopWidth: 1, flexDirection: 'row', paddingHorizontal: 12, paddingVertical: 10 },
+  composerWrap: { backgroundColor: colors.surface, borderTopColor: colors.line, borderTopWidth: 1, paddingHorizontal: 12, paddingVertical: 10 },
+  composerRow: { alignItems: 'flex-end', flexDirection: 'row' },
+  pendingAttachments: { paddingBottom: 9 },
+  pendingAttachment: { alignItems: 'center', backgroundColor: colors.background, borderColor: colors.line, borderRadius: 8, borderWidth: 1, flexDirection: 'row', height: 52, marginRight: 8, maxWidth: 230, paddingLeft: 10 },
+  pendingAttachmentCopy: { marginLeft: 6, minWidth: 0, width: 128 },
+  pendingAttachmentName: { color: colors.ink, fontSize: 12, fontWeight: '700' },
+  pendingAttachmentSize: { color: colors.subtle, fontSize: 10, marginTop: 2 },
+  pendingRemoveButton: { alignItems: 'center', height: 36, justifyContent: 'center', width: 36 },
+  attachButton: { alignItems: 'center', backgroundColor: colors.background, borderColor: colors.line, borderRadius: 8, borderWidth: 1, height: 48, justifyContent: 'center', marginRight: 8, width: 48 },
   composerInput: { backgroundColor: colors.background, borderColor: colors.line, borderRadius: 8, borderWidth: 1, color: colors.ink, flex: 1, fontSize: 15, maxHeight: 100, minHeight: 48, paddingHorizontal: 14, paddingTop: 12 },
   sendButton: { alignItems: 'center', backgroundColor: colors.accent, borderRadius: 8, height: 48, justifyContent: 'center', marginLeft: 8, width: 48 },
   stopButton: { backgroundColor: colors.danger },

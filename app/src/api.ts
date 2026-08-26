@@ -39,11 +39,23 @@ export type AgentMessage = {
   role: 'assistant' | 'user';
   text: string;
   createdAt: string;
+  attachments?: ChatAttachment[];
   error?: string;
   interaction?: AgentInteraction;
   status?: string;
   steps?: AgentStep[];
   streaming?: boolean;
+};
+
+export type ChatAttachment = {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+};
+
+export type ChatAttachmentUpload = ChatAttachment & {
+  data: string;
 };
 
 export type AgentStep = {
@@ -632,6 +644,7 @@ export async function streamAgentMessage(
   deviceId: string,
   conversationId: string,
   text: string,
+  attachments: ChatAttachmentUpload[],
   handlers: AgentStreamHandlers,
   signal?: AbortSignal,
 ): Promise<AgentMessage> {
@@ -714,6 +727,7 @@ export async function streamAgentMessage(
           deviceId,
           conversationId,
           text,
+          attachments,
         }));
       } else if (payload.type === 'chat.delta') {
         const delta = String(payload.delta || '');

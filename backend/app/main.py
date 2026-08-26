@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import binascii
 import hashlib
 import io
 import json
@@ -14,7 +16,7 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from sqlalchemy import create_engine, delete, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -34,6 +36,8 @@ DATABASE_URL = os.getenv("CLAWPI_DATABASE_URL", "sqlite:///./clawpi.db")
 JWT_SECRET = os.getenv("CLAWPI_JWT_SECRET", "clawpi-local-development-secret-change-me")
 ADMIN_KEY = os.getenv("CLAWPI_ADMIN_KEY", "")
 ARTIFACT_DIR = Path(os.getenv("CLAWPI_ARTIFACT_DIR", "./capability-artifacts"))
+MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024
+MAX_ATTACHMENTS_BYTES = 6 * 1024 * 1024
 
 engine = create_engine(
     DATABASE_URL,
@@ -119,9 +123,36 @@ class ProvisioningClaimInput(BaseModel):
     version: str = Field(default="unknown", max_length=80)
 
 
+class ChatAttachmentInput(BaseModel):
+    id: str = Field(min_length=1, max_length=100)
+    name: str = Field(min_length=1, max_length=200)
+    mimeType: str = Field(default="application/octet-stream", max_length=200)
+    size: int = Field(gt=0, le=MAX_ATTACHMENT_BYTES)
+    data: str = Field(min_length=1, max_length=(MAX_ATTACHMENT_BYTES * 4 // 3) + 8)
+
+    @model_validator(mode="after")
+    def validate_data(self):
+        try:
+            decoded_size = len(base64.b64decode(self.data, validate=True))
+        except (binascii.Error, ValueError):
+            raise ValueError("附件内容无效")
+        if decoded_size != self.size:
+            raise ValueError("附件大小不一致")
+        return self
+
+
 class MessageInput(BaseModel):
     conversationId: str = Field(min_length=1, max_length=128)
-    text: str = Field(min_length=1, max_length=32_000)
+    text: str = Field(default="", max_length=32_000)
+    attachments: list[ChatAttachmentInput] = Field(default_factory=list, max_length=3)
+
+    @model_validator(mode="after")
+    def validate_content(self):
+        if not self.text.strip() and not self.attachments:
+            raise ValueError("消息内容不能为空")
+        if sum(item.size for item in self.attachments) > MAX_ATTACHMENTS_BYTES:
+            raise ValueError("附件总大小不能超过 6 MB")
+        return self
 
 
 class AgentConfigInput(BaseModel):
@@ -691,7 +722,12 @@ async def send_message(
     if not relay.is_online(device.id):
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "主机当前离线")
     try:
-        return await relay.request(device.id, payload.conversationId, payload.text)
+        return await relay.request(
+            device.id,
+            payload.conversationId,
+            payload.text,
+            [item.model_dump() for item in payload.attachments],
+        )
     except HostOffline:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "主机连接已断开")
     except TimeoutError:
@@ -785,6 +821,7 @@ async def user_chat_websocket(websocket: WebSocket) -> None:
                         device_id,
                         message.conversationId,
                         message.text,
+                        [item.model_dump() for item in message.attachments],
                         stream=True,
                     )
                 except HostOffline:

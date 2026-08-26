@@ -69,6 +69,7 @@ class Relay:
         device_id: str,
         conversation_id: str,
         text: str,
+        attachments: list[dict] | None = None,
         stream: bool = False,
     ) -> tuple[HostConnection, str, PendingRequest]:
         connection = self._hosts.get(device_id)
@@ -88,6 +89,7 @@ class Relay:
                         "requestId": request_id,
                         "conversationId": conversation_id,
                         "text": text,
+                        "attachments": attachments or [],
                     }
                 )
         except (OSError, RuntimeError) as error:
@@ -95,9 +97,15 @@ class Relay:
             raise HostOffline from error
         return connection, request_id, pending
 
-    async def request(self, device_id: str, conversation_id: str, text: str) -> dict:
+    async def request(
+        self,
+        device_id: str,
+        conversation_id: str,
+        text: str,
+        attachments: list[dict] | None = None,
+    ) -> dict:
         connection, request_id, pending = await self.start_chat(
-            device_id, conversation_id, text
+            device_id, conversation_id, text, attachments
         )
         try:
             return await asyncio.wait_for(pending.future, timeout=90)

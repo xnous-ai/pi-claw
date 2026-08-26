@@ -161,6 +161,7 @@ async def run_host(server: str, credentials: dict) -> None:
             async with connect(
                 websocket_url(server, credentials["deviceId"]),
                 additional_headers={"Authorization": f"Bearer {credentials['hostToken']}"},
+                max_size=12 * 1024 * 1024,
             ) as websocket:
                 delay = 1
                 heartbeat_task = asyncio.create_task(heartbeat(websocket))
@@ -183,7 +184,9 @@ async def run_host(server: str, credentials: dict) -> None:
                             continue
                         if message.get("type") != "chat.request":
                             continue
-                        text = f"Pi agent 模拟回复：已收到“{message['text']}”"
+                        attachment_count = len(message.get("attachments") or [])
+                        suffix = f"，包含 {attachment_count} 个附件" if attachment_count else ""
+                        text = f"Pi agent 模拟回复：已收到“{message['text']}”{suffix}"
                         midpoint = max(1, len(text) // 2)
                         for chunk in (text[:midpoint], text[midpoint:]):
                             await websocket.send(
