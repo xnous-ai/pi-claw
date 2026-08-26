@@ -12,6 +12,7 @@ import {
   ActivityIndicator,
   Alert,
   BackHandler,
+  Image,
   Keyboard,
   KeyboardAvoidingView,
   Linking,
@@ -203,6 +204,64 @@ async function openGeneratedAttachment(attachment: ChatAttachment) {
   } catch (openError) {
     Alert.alert('无法打开文件', errorMessage(openError));
   }
+}
+
+function AgentAttachment({ attachment }: { attachment: ChatAttachment }) {
+  const [aspectRatio, setAspectRatio] = useState(4 / 3);
+  const [previewFailed, setPreviewFailed] = useState(false);
+  const previewable = ['image/gif', 'image/jpeg', 'image/png', 'image/webp']
+    .includes(attachment.mimeType.toLowerCase());
+
+  if (previewable && attachment.uri && !previewFailed) {
+    return (
+      <Pressable
+        accessibilityLabel={`查看图片 ${attachment.name}`}
+        accessibilityRole="button"
+        onPress={() => openGeneratedAttachment(attachment)}
+        style={({ pressed }) => [styles.agentImageAttachment, pressed && styles.agentAttachmentRowPressed]}
+      >
+        <Image
+          accessibilityLabel={attachment.name}
+          onError={() => setPreviewFailed(true)}
+          onLoad={(event) => {
+            const { width, height } = event.nativeEvent.source;
+            if (width > 0 && height > 0) {
+              setAspectRatio(Math.min(1.8, Math.max(0.65, width / height)));
+            }
+          }}
+          resizeMode="contain"
+          source={{ uri: attachment.uri }}
+          style={[styles.agentImagePreview, { aspectRatio }]}
+        />
+        <View style={styles.agentImageCaption}>
+          <View style={styles.messageAttachmentCopy}>
+            <Text numberOfLines={1} style={styles.agentAttachmentName}>{attachment.name}</Text>
+            <Text style={styles.agentAttachmentSize}>{formatBytes(attachment.size)}</Text>
+          </View>
+          <Icon color={colors.subtle} name="download" size={18} />
+        </View>
+      </Pressable>
+    );
+  }
+
+  return (
+    <Pressable
+      accessibilityLabel={`打开文件 ${attachment.name}`}
+      accessibilityRole="button"
+      onPress={() => openGeneratedAttachment(attachment)}
+      style={({ pressed }) => [
+        styles.agentAttachmentRow,
+        pressed && styles.agentAttachmentRowPressed,
+      ]}
+    >
+      <Icon color={colors.accent} name="description" size={19} />
+      <View style={styles.messageAttachmentCopy}>
+        <Text numberOfLines={1} style={styles.agentAttachmentName}>{attachment.name}</Text>
+        <Text style={styles.agentAttachmentSize}>{formatBytes(attachment.size)}</Text>
+      </View>
+      <Icon color={colors.subtle} name="download" size={18} />
+    </Pressable>
+  );
 }
 
 async function syncConversationsFromHosts(
@@ -1378,22 +1437,7 @@ function ChatScreen({
                       {!!message.attachments?.length && (
                         <View style={[styles.messageAttachments, !!message.text && styles.agentAttachments]}>
                           {message.attachments.map((attachment) => (
-                            <Pressable
-                              accessibilityLabel={`打开文件 ${attachment.name}`}
-                              key={attachment.id}
-                              onPress={() => openGeneratedAttachment(attachment)}
-                              style={({ pressed }) => [
-                                styles.agentAttachmentRow,
-                                pressed && styles.agentAttachmentRowPressed,
-                              ]}
-                            >
-                              <Icon color={colors.accent} name="description" size={19} />
-                              <View style={styles.messageAttachmentCopy}>
-                                <Text numberOfLines={1} style={styles.agentAttachmentName}>{attachment.name}</Text>
-                                <Text style={styles.agentAttachmentSize}>{formatBytes(attachment.size)}</Text>
-                              </View>
-                              <Icon color={colors.subtle} name="download" size={18} />
-                            </Pressable>
+                            <AgentAttachment attachment={attachment} key={attachment.id} />
                           ))}
                         </View>
                       )}
@@ -2901,6 +2945,9 @@ const styles = StyleSheet.create({
   agentAttachmentRowPressed: { backgroundColor: colors.accentSoft },
   agentAttachmentName: { color: colors.ink, fontSize: 12, fontWeight: '700' },
   agentAttachmentSize: { color: colors.subtle, fontSize: 10, marginTop: 2 },
+  agentImageAttachment: { backgroundColor: colors.background, borderRadius: 6, marginBottom: 8, overflow: 'hidden', width: '100%' },
+  agentImagePreview: { backgroundColor: '#EEF1F5', width: '100%' },
+  agentImageCaption: { alignItems: 'center', flexDirection: 'row', minHeight: 46, paddingHorizontal: 10, paddingRight: 12 },
   agentTime: { color: colors.subtle, fontSize: 10, marginTop: 6 },
   userTime: { color: '#C6D0E0', fontSize: 10, marginTop: 6, textAlign: 'right' },
   messageError: { alignItems: 'flex-start', alignSelf: 'flex-end', flexDirection: 'row', marginTop: 6, maxWidth: '79%' },
