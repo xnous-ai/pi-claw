@@ -951,6 +951,80 @@ function InteractionPrompt({
   );
 }
 
+function AgentProcess({
+  message,
+  onRespond,
+}: {
+  message: AgentMessage;
+  onRespond: (interactionId: string, response: InteractionResponse, answer: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(!!message.streaming);
+  const steps = message.steps ?? [];
+  const running = !!message.streaming;
+  const hasRunningStep = steps.some((step) => step.state === 'running');
+  const stopped = message.status === '已停止运行';
+
+  useEffect(() => {
+    setExpanded(running);
+  }, [running]);
+
+  if (!running && !steps.length && !message.status) return null;
+
+  return (
+    <View style={styles.agentProcessSurface}>
+      {!running && (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityState={{ expanded }}
+          onPress={() => setExpanded((current) => !current)}
+          style={({ pressed }) => [styles.agentProcessToggle, pressed && styles.rowPressed]}
+        >
+          <Icon color={stopped ? colors.subtle : colors.success} name={stopped ? 'stop_circle' : 'check_circle'} size={17} />
+          <Text style={styles.agentProcessSummary}>
+            {stopped ? '运行已停止' : `已完成 ${steps.length} 个步骤`}
+          </Text>
+          <Icon color={colors.subtle} name={expanded ? 'expand_less' : 'expand_more'} size={20} />
+        </Pressable>
+      )}
+      {(running || expanded) && (
+        <View style={!running ? styles.agentProcessDetails : undefined}>
+          {steps.map((step) => (
+            <View key={step.id} style={styles.agentStepRow}>
+              <View style={styles.agentStepIcon}>
+                {step.state === 'running' ? (
+                  <ActivityIndicator color={colors.accent} size="small" />
+                ) : (
+                  <Icon
+                    color={step.state === 'error' ? colors.danger : step.state === 'cancelled' ? colors.subtle : colors.success}
+                    name={step.state === 'error' ? 'error' : step.state === 'cancelled' ? 'stop_circle' : 'check_circle'}
+                    size={16}
+                  />
+                )}
+              </View>
+              <Text style={styles.agentStepText}>{step.label}</Text>
+            </View>
+          ))}
+          {running && !hasRunningStep && !message.interaction?.pending && (
+            <View style={styles.agentStepRow}>
+              <View style={styles.agentStepIcon}><ActivityIndicator color={colors.accent} size="small" /></View>
+              <Text accessibilityLiveRegion="polite" style={styles.agentStepText}>
+                {steps.length ? '正在整理结果' : message.status || 'Pi agent 正在处理'}
+              </Text>
+            </View>
+          )}
+          {running && message.interaction?.pending && (
+            <InteractionPrompt
+              interaction={message.interaction}
+              key={message.interaction.id}
+              onRespond={onRespond}
+            />
+          )}
+        </View>
+      )}
+    </View>
+  );
+}
+
 function ChatScreen({
   conversation,
   device,
@@ -1039,54 +1113,27 @@ function ChatScreen({
         <Text style={styles.dateDividerText}>今天</Text>
         {conversation.messages.map((message) => (
           <View key={message.id} style={styles.messageGroup}>
-            <View style={[styles.messageRow, message.role === 'user' && styles.userMessageRow]}>
-              {message.role === 'assistant' && <View style={styles.agentAvatar}><Text style={styles.agentAvatarText}>P</Text></View>}
-              <View style={[styles.messageBubble, message.role === 'user' ? styles.userBubble : styles.agentBubble]}>
-                {message.role === 'assistant' && !!message.steps?.length && (
-                  <View style={styles.agentSteps}>
-                    {message.steps.map((step) => (
-                      <View key={step.id} style={styles.agentStepRow}>
-                        {step.state === 'running' ? (
-                          <ActivityIndicator color={colors.accent} size="small" />
-                        ) : (
-                          <Icon
-                            color={step.state === 'error' ? colors.danger : step.state === 'cancelled' ? colors.subtle : colors.success}
-                            name={step.state === 'error' ? 'error' : step.state === 'cancelled' ? 'stop_circle' : 'check_circle'}
-                            size={16}
-                          />
-                        )}
-                        <Text style={styles.agentStepText}>{step.label}</Text>
-                      </View>
-                    ))}
-                  </View>
-                )}
-                {message.role === 'assistant' && message.streaming && !message.text && !message.interaction && (
-                  <View style={styles.inlineAgentStatus}>
-                    <ActivityIndicator color={colors.accent} size="small" />
-                    <Text accessibilityLiveRegion="polite" style={styles.typingText}>
-                      {message.status || 'Pi agent 正在处理'}
-                    </Text>
-                  </View>
-                )}
-                {message.role === 'assistant' && !message.streaming && !!message.status && (
-                  <View style={styles.stoppedStatus}>
-                    <Icon color={colors.subtle} name="stop_circle" size={16} />
-                    <Text accessibilityLiveRegion="polite" style={styles.stoppedStatusText}>{message.status}</Text>
-                  </View>
-                )}
-                {!!message.text && (
-                  <Text style={message.role === 'user' ? styles.userMessageText : styles.agentMessageText}>{message.text}</Text>
-                )}
-                {message.role === 'assistant' && message.interaction && (
-                  <InteractionPrompt
-                    interaction={message.interaction}
-                    key={message.interaction.id}
-                    onRespond={onRespondInteraction}
-                  />
-                )}
-                <Text style={message.role === 'user' ? styles.userTime : styles.agentTime}>{formatTime(message.createdAt)}</Text>
+            {message.role === 'user' ? (
+              <View style={[styles.messageRow, styles.userMessageRow]}>
+                <View style={[styles.messageBubble, styles.userBubble]}>
+                  <Text style={styles.userMessageText}>{message.text}</Text>
+                  <Text style={styles.userTime}>{formatTime(message.createdAt)}</Text>
+                </View>
               </View>
-            </View>
+            ) : (
+              <View style={styles.messageRow}>
+                <View style={styles.agentAvatar}><Text style={styles.agentAvatarText}>P</Text></View>
+                <View style={styles.agentMessageColumn}>
+                  <AgentProcess message={message} onRespond={onRespondInteraction} />
+                  {!message.streaming && !!message.text && (
+                    <View style={[styles.messageBubble, styles.agentBubble, styles.agentResultBubble]}>
+                      <Text style={styles.agentMessageText}>{message.text}</Text>
+                      <Text style={styles.agentTime}>{formatTime(message.createdAt)}</Text>
+                    </View>
+                  )}
+                </View>
+              </View>
+            )}
             {message.role === 'user' && !!message.error && (
               <View style={styles.messageError}>
                 <Icon color={colors.danger} name="error" size={15} />
@@ -2356,8 +2403,10 @@ const styles = StyleSheet.create({
   userMessageRow: { justifyContent: 'flex-end' },
   agentAvatar: { alignItems: 'center', backgroundColor: colors.ink, borderRadius: 8, height: 30, justifyContent: 'center', marginRight: 8, width: 30 },
   agentAvatarText: { color: colors.surface, fontSize: 14, fontWeight: '800' },
+  agentMessageColumn: { flex: 1, maxWidth: '79%', minWidth: 0 },
   messageBubble: { borderRadius: 8, maxWidth: '79%', paddingBottom: 9, paddingHorizontal: 14, paddingTop: 12 },
   agentBubble: { backgroundColor: colors.surface, borderBottomLeftRadius: 2 },
+  agentResultBubble: { alignSelf: 'flex-start', maxWidth: '100%' },
   userBubble: { backgroundColor: colors.ink, borderBottomRightRadius: 2 },
   agentMessageText: { color: colors.ink, fontSize: 15, lineHeight: 22 },
   userMessageText: { color: colors.surface, fontSize: 15, lineHeight: 22 },
@@ -2365,13 +2414,13 @@ const styles = StyleSheet.create({
   userTime: { color: '#C6D0E0', fontSize: 10, marginTop: 6, textAlign: 'right' },
   messageError: { alignItems: 'flex-start', alignSelf: 'flex-end', flexDirection: 'row', marginTop: 6, maxWidth: '79%' },
   messageErrorText: { color: colors.danger, flexShrink: 1, fontSize: 12, lineHeight: 17, marginLeft: 5, textAlign: 'right' },
-  agentSteps: { borderBottomColor: colors.line, borderBottomWidth: StyleSheet.hairlineWidth, marginBottom: 10, paddingBottom: 7 },
-  agentStepRow: { alignItems: 'center', flexDirection: 'row', minHeight: 26 },
-  agentStepText: { color: colors.muted, flex: 1, fontSize: 12, lineHeight: 17, marginLeft: 7 },
-  inlineAgentStatus: { alignItems: 'center', flexDirection: 'row', minHeight: 28 },
-  typingText: { color: colors.muted, fontSize: 13, marginLeft: 8 },
-  stoppedStatus: { alignItems: 'center', flexDirection: 'row', minHeight: 26 },
-  stoppedStatusText: { color: colors.subtle, fontSize: 12, lineHeight: 18, marginLeft: 6 },
+  agentProcessSurface: { alignSelf: 'stretch', backgroundColor: colors.surface, borderColor: colors.line, borderRadius: 8, borderWidth: 1, marginBottom: 8, overflow: 'hidden', paddingHorizontal: 12, paddingVertical: 8 },
+  agentProcessToggle: { alignItems: 'center', flexDirection: 'row', minHeight: 40 },
+  agentProcessSummary: { color: colors.muted, flex: 1, fontSize: 13, lineHeight: 19, marginHorizontal: 8 },
+  agentProcessDetails: { borderTopColor: colors.line, borderTopWidth: StyleSheet.hairlineWidth, paddingTop: 6 },
+  agentStepRow: { alignItems: 'flex-start', flexDirection: 'row', minHeight: 28, paddingVertical: 4, width: '100%' },
+  agentStepIcon: { alignItems: 'center', justifyContent: 'center', minHeight: 18, paddingTop: 1, width: 20 },
+  agentStepText: { color: colors.muted, flex: 1, flexShrink: 1, fontSize: 12, lineHeight: 18, marginLeft: 7 },
   interactionBlock: { borderTopColor: colors.line, borderTopWidth: StyleSheet.hairlineWidth, marginTop: 12, paddingTop: 12 },
   interactionTitle: { color: colors.ink, fontSize: 14, fontWeight: '700', lineHeight: 20 },
   interactionMessage: { color: colors.muted, fontSize: 12, lineHeight: 18, marginTop: 3 },
