@@ -33,6 +33,8 @@ ClawPi 守护进程及其启动的 Pi 进程均以 root 运行，不创建额外
 
 管理员在云端后台发布 Skill 或插件后，用户可在 App 的“主机 > 能力管理”中安装。Skill 安装到 `/var/lib/clawpi/pi-config/skills`；插件通过 Pi 自带的 `pi install` / `pi remove` 管理。安装状态保存在 `/var/lib/clawpi/capabilities.json`，实际能力代码仍只在用户自己的主机运行。
 
+App 的主机详情会实时读取 CPU、内存和根分区硬盘占用，并扫描 Pi 配置目录中的本机能力。包含 `SKILL.md` 的 `/var/lib/clawpi/pi-config/skills/*` 目录会显示为 Skill；`/var/lib/clawpi/pi-config/extensions` 下的扩展文件或目录会显示为插件。未通过能力商店安装的条目会标记为“本地”，App 只展示、不提供卸载操作。
+
 安装脚本还会部署内置的 `ask_user` Pi 工具。Agent 调用该工具时，App 会显示选择按钮，并把答案送回同一个 Pi RPC 会话继续执行。
 
 ## 模拟器

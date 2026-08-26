@@ -249,6 +249,20 @@ class BackendFlowTest(unittest.TestCase):
                         },
                     ],
                 }))
+                system_request = json.loads(await websocket.recv())
+                self.assertEqual(system_request["type"], "system.status.get")
+                await websocket.send(json.dumps({
+                    "type": "system.status",
+                    "requestId": system_request["requestId"],
+                    "cpuPercent": 18.5,
+                    "memoryPercent": 42.0,
+                    "memoryUsedBytes": 4_200_000_000,
+                    "memoryTotalBytes": 10_000_000_000,
+                    "diskPercent": 61.5,
+                    "diskUsedBytes": 61_500_000_000,
+                    "diskTotalBytes": 100_000_000_000,
+                    "sampledAt": "2026-08-26T08:00:00Z",
+                }))
                 request = json.loads(await websocket.recv())
                 self.assertEqual(request["type"], "chat.request")
                 await websocket.send(
@@ -331,7 +345,14 @@ class BackendFlowTest(unittest.TestCase):
                 await websocket.send(json.dumps({
                     "type": "capability.result",
                     "requestId": capability_list["requestId"],
-                    "data": {"installed": []},
+                    "data": {"installed": [{
+                        "id": "local-skill:writer",
+                        "name": "writer",
+                        "kind": "skill",
+                        "version": "",
+                        "local": True,
+                        "managed": False,
+                    }]},
                 }))
                 capability_install = json.loads(await websocket.recv())
                 self.assertEqual(capability_install["type"], "capability.install")
@@ -413,6 +434,16 @@ class BackendFlowTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(commands[0]["name"], "weather")
         self.assertEqual(commands[1]["source"], "skill")
+
+        status, system_status = http_json(
+            f"{self.base}/v1/devices/{device['id']}/system-status",
+            token=token,
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(system_status["online"])
+        self.assertEqual(system_status["cpuPercent"], 18.5)
+        self.assertEqual(system_status["memoryPercent"], 42.0)
+        self.assertEqual(system_status["diskPercent"], 61.5)
 
         status, reply = http_json(
             f"{self.base}/v1/devices/{device['id']}/messages",
@@ -526,7 +557,12 @@ class BackendFlowTest(unittest.TestCase):
             token=token,
         )
         self.assertEqual(status, 200)
-        self.assertFalse(catalog[0]["installed"])
+        local_capability = next(item for item in catalog if item["id"] == "local-skill:writer")
+        self.assertTrue(local_capability["installed"])
+        self.assertTrue(local_capability["local"])
+        self.assertFalse(local_capability["managed"])
+        store_capability = next(item for item in catalog if item["id"] == "test-extension")
+        self.assertFalse(store_capability["installed"])
         status, installed = http_json(
             f"{self.base}/v1/devices/{device['id']}/capabilities/test-extension",
             "POST",

@@ -13,6 +13,19 @@ export type Device = {
   lastSeenAt: string;
   agentProvider?: AgentProvider;
   agentModel?: string;
+  systemStatus?: DeviceSystemStatus;
+};
+
+export type DeviceSystemStatus = {
+  online: boolean;
+  cpuPercent: number | null;
+  memoryPercent: number | null;
+  memoryUsedBytes: number | null;
+  memoryTotalBytes: number | null;
+  diskPercent: number | null;
+  diskUsedBytes: number | null;
+  diskTotalBytes: number | null;
+  sampledAt: string;
 };
 
 export type AuthSession = {
@@ -114,6 +127,8 @@ export type DeviceCapability = {
   artifactAvailable: boolean;
   installed: boolean;
   installedVersion: string;
+  local: boolean;
+  managed: boolean;
 };
 
 export type WifiNetwork = {
@@ -476,6 +491,31 @@ export async function getDevice(token: string, deviceId: string): Promise<Device
   return request<Device>(`/v1/devices/${encodeURIComponent(deviceId)}`, { method: 'GET' }, token);
 }
 
+export async function getDeviceSystemStatus(
+  token: string,
+  deviceId: string,
+): Promise<DeviceSystemStatus> {
+  if (isDemoMode) {
+    await delay(250);
+    return {
+      online: true,
+      cpuPercent: 18.5,
+      memoryPercent: 42,
+      memoryUsedBytes: 3_500_000_000,
+      memoryTotalBytes: 8_000_000_000,
+      diskPercent: 61.5,
+      diskUsedBytes: 78_000_000_000,
+      diskTotalBytes: 128_000_000_000,
+      sampledAt: new Date().toISOString(),
+    };
+  }
+  return request<DeviceSystemStatus>(
+    `/v1/devices/${encodeURIComponent(deviceId)}/system-status`,
+    { method: 'GET' },
+    token,
+  );
+}
+
 export async function getDeviceCapabilities(
   token: string,
   deviceId: string,
@@ -495,6 +535,23 @@ export async function getDeviceCapabilities(
         artifactAvailable: true,
         installed: false,
         installedVersion: '',
+        local: false,
+        managed: true,
+      },
+      {
+        id: 'local-extension:workspace-tools',
+        name: 'workspace-tools',
+        kind: 'extension',
+        description: '在主机本地发现，未由能力商店管理。',
+        version: '',
+        source: '',
+        permissions: [],
+        enabled: false,
+        artifactAvailable: false,
+        installed: true,
+        installedVersion: '',
+        local: true,
+        managed: false,
       },
     ];
   }

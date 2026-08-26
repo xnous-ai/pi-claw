@@ -24,9 +24,6 @@ from websockets.asyncio.client import connect
 
 from simulator import request_json, save_credentials, websocket_url
 
-if os.name != "nt":
-    import pwd
-
 
 PROVIDER_CATALOG = [
     ("anthropic", "Anthropic", "ANTHROPIC_API_KEY"),
@@ -433,7 +430,7 @@ def wait_for_setup(
             monitor.join(timeout=3)
 
 
-def save_agent_config(path: Path, config: dict, owner: str = "") -> dict:
+def save_agent_config(path: Path, config: dict) -> dict:
     provider = str(config["provider"]).strip().lower()
     api_key = str(config["apiKey"]).strip()
     model = str(config.get("model", "")).strip()
@@ -447,10 +444,7 @@ def save_agent_config(path: Path, config: dict, owner: str = "") -> dict:
     saved = {"provider": provider, "apiKey": api_key, "model": model}
     path.write_text(json.dumps(saved, indent=2), encoding="utf-8")
     if os.name != "nt":
-        path.chmod(0o660)
-        if owner and os.geteuid() == 0:
-            user = pwd.getpwnam(owner)
-            os.chown(path, user.pw_uid, user.pw_gid)
+        path.chmod(0o600)
     return saved
 
 
@@ -482,16 +476,6 @@ def claim_with_retry(server: str, token: str, serial: str, version: str) -> dict
             last_error = error
             time.sleep(2)
     raise RuntimeError(f"主机认领失败：{last_error}")
-
-
-def drop_privileges(user_name: str) -> None:
-    if os.name == "nt" or os.geteuid() != 0 or not user_name:
-        return
-    user = pwd.getpwnam(user_name)
-    os.initgroups(user_name, user.pw_gid)
-    os.setgid(user.pw_gid)
-    os.setuid(user.pw_uid)
-    os.environ.update(HOME=user.pw_dir, USER=user_name, LOGNAME=user_name)
 
 
 def message_text(message: dict) -> str:
@@ -895,6 +879,82 @@ async def heartbeat(websocket) -> None:
         await websocket.send(json.dumps({"type": "heartbeat"}))
 
 
+def cpu_usage_percent(before: str, after: str) -> float:
+    def totals(value: str) -> tuple[int, int]:
+        fields = value.splitlines()[0].split()
+        if not fields or fields[0] != "cpu" or len(fields) < 5:
+            raise ValueError("无法读取 CPU 状态")
+        values = [int(item) for item in fields[1:]]
+        idle = values[3] + (values[4] if len(values) > 4 else 0)
+        return sum(values), idle
+
+    total_before, idle_before = totals(before)
+    total_after, idle_after = totals(after)
+    elapsed = total_after - total_before
+    if elapsed <= 0:
+        return 0.0
+    return round(max(0.0, min(100.0, (elapsed - (idle_after - idle_before)) * 100 / elapsed)), 1)
+
+
+def memory_usage(meminfo: str) -> tuple[int, int, float]:
+    values = {}
+    for line in meminfo.splitlines():
+        key, separator, raw = line.partition(":")
+        if separator:
+            values[key] = int(raw.strip().split()[0]) * 1024
+    total = values.get("MemTotal", 0)
+    available = values.get("MemAvailable", values.get("MemFree", 0))
+    if total <= 0:
+        raise ValueError("无法读取内存状态")
+    used = max(0, total - available)
+    return used, total, round(used * 100 / total, 1)
+
+
+def collect_system_status(sample_interval: float = 0.12) -> dict:
+    before = Path("/proc/stat").read_text(encoding="utf-8")
+    time.sleep(sample_interval)
+    after = Path("/proc/stat").read_text(encoding="utf-8")
+    memory_used, memory_total, memory_percent = memory_usage(
+        Path("/proc/meminfo").read_text(encoding="utf-8")
+    )
+    disk = shutil.disk_usage("/")
+    return {
+        "cpuPercent": cpu_usage_percent(before, after),
+        "memoryPercent": memory_percent,
+        "memoryUsedBytes": memory_used,
+        "memoryTotalBytes": memory_total,
+        "diskPercent": round(disk.used * 100 / disk.total, 1) if disk.total else 0.0,
+        "diskUsedBytes": disk.used,
+        "diskTotalBytes": disk.total,
+        "sampledAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+
+async def handle_system_status(websocket, message: dict) -> None:
+    request_id = str(message.get("requestId", ""))
+    try:
+        if not request_id:
+            raise ValueError("系统状态请求无效")
+        status = await asyncio.to_thread(collect_system_status)
+        await websocket.send(
+            json.dumps(
+                {"type": "system.status", "requestId": request_id, **status},
+                ensure_ascii=False,
+            )
+        )
+    except Exception as error:
+        await websocket.send(
+            json.dumps(
+                {
+                    "type": "system.status.error",
+                    "requestId": request_id,
+                    "message": str(error)[:300] or "读取系统状态失败",
+                },
+                ensure_ascii=False,
+            )
+        )
+
+
 async def handle_chat(
     websocket,
     message: dict,
@@ -1100,6 +1160,58 @@ def save_capability_state(path: Path, capabilities: list[dict]) -> None:
     temporary.replace(path)
 
 
+def discover_capabilities(
+    capability_state: Path,
+    skills_dir: Path,
+    extensions_dir: Path,
+) -> list[dict]:
+    installed = [{**item, "managed": True, "local": False} for item in load_capability_state(capability_state)]
+    managed_ids = {str(item.get("id", "")) for item in installed}
+
+    if skills_dir.exists():
+        for entry in sorted(skills_dir.iterdir(), key=lambda item: item.name.lower()):
+            if entry.name.startswith(".") or not entry.is_dir() or not (entry / "SKILL.md").is_file():
+                continue
+            if entry.name in managed_ids:
+                continue
+            installed.append(
+                {
+                    "id": f"local-skill:{entry.name}",
+                    "name": entry.name,
+                    "kind": "skill",
+                    "version": "",
+                    "source": "",
+                    "managed": False,
+                    "local": True,
+                }
+            )
+
+    extension_names = set()
+    if extensions_dir.exists():
+        for entry in sorted(extensions_dir.iterdir(), key=lambda item: item.name.lower()):
+            if entry.name.startswith("."):
+                continue
+            if entry.is_file() and entry.suffix.lower() in {".js", ".cjs", ".mjs", ".ts"}:
+                extension_names.add(entry.stem)
+            elif entry.is_dir():
+                extension_names.add(entry.name)
+    for name in sorted(extension_names, key=str.lower):
+        if name in managed_ids:
+            continue
+        installed.append(
+            {
+                "id": f"local-extension:{name}",
+                "name": name,
+                "kind": "extension",
+                "version": "",
+                "source": "",
+                "managed": False,
+                "local": True,
+            }
+        )
+    return installed
+
+
 def download_skill(server: str, artifact_path: str, expected_sha256: str) -> bytes:
     url = urljoin(f"{server.rstrip('/')}/", artifact_path.lstrip("/"))
     with urllib.request.urlopen(url, timeout=45) as response:
@@ -1229,6 +1341,7 @@ async def handle_capability(
     pi_command: str,
     capability_state: Path,
     skills_dir: Path,
+    extensions_dir: Path,
 ) -> None:
     request_id = str(message.get("requestId", ""))
     try:
@@ -1236,7 +1349,7 @@ async def handle_capability(
             raise ValueError("能力请求无效")
         action = str(message.get("type", "")).removeprefix("capability.")
         if action == "list":
-            installed = load_capability_state(capability_state)
+            installed = discover_capabilities(capability_state, skills_dir, extensions_dir)
         elif action == "install":
             capability = message.get("capability")
             if not isinstance(capability, dict):
@@ -1285,6 +1398,7 @@ async def run_host(
     agent_config_path: Path,
     capability_state: Path,
     skills_dir: Path,
+    extensions_dir: Path,
     timeout: int,
 ) -> None:
     delay = 1
@@ -1360,6 +1474,8 @@ async def run_host(
                             )
                         elif message.get("type") == "agent.commands.get":
                             await handle_agent_commands(websocket, message, agent)
+                        elif message.get("type") == "system.status.get":
+                            await handle_system_status(websocket, message)
                         elif str(message.get("type", "")).startswith("capability."):
                             await handle_capability(
                                 websocket,
@@ -1368,6 +1484,7 @@ async def run_host(
                                 agent.command,
                                 capability_state,
                                 skills_dir,
+                                extensions_dir,
                             )
                 finally:
                     chats_to_cancel = list(active_chats.values())
@@ -1409,7 +1526,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hotspot-connection", default="clawpi-setup")
     parser.add_argument("--allow-http", action="store_true")
     parser.add_argument("--skip-hotspot", action="store_true")
-    parser.add_argument("--run-as-user", default=os.getenv("CLAWPI_RUN_AS_USER", "clawpi"))
     parser.add_argument("--pi-command", default=os.getenv("CLAWPI_PI_COMMAND", "pi"))
     parser.add_argument("--pi-provider", default=os.getenv("CLAWPI_PI_PROVIDER") or None)
     parser.add_argument("--pi-model", default=os.getenv("CLAWPI_PI_MODEL") or None)
@@ -1490,7 +1606,6 @@ def main() -> None:
         args.pi_provider = agent_config["provider"]
         args.pi_model = agent_config["model"] or None
 
-    drop_privileges(args.run_as_user)
     agent = PiRpcAgent(
         args.pi_command,
         args.sessions,
@@ -1511,6 +1626,7 @@ def main() -> None:
             args.agent_config,
             args.capability_state,
             Path(os.getenv("PI_CODING_AGENT_DIR", "/var/lib/clawpi/pi-config")) / "skills",
+            Path(os.getenv("PI_CODING_AGENT_DIR", "/var/lib/clawpi/pi-config")) / "extensions",
             args.agent_timeout,
         )
     )

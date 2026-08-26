@@ -27,6 +27,7 @@ import {
   getDeviceAgentConfig,
   getDeviceCommands,
   getDeviceCapabilities,
+  getDeviceSystemStatus,
   installDeviceCapability,
   isDemoMode,
   login,
@@ -52,6 +53,7 @@ import {
   type Device,
   type DeviceCapability,
   type DeviceProvisioning,
+  type DeviceSystemStatus,
   type WifiNetwork,
 } from './src/api';
 import {
@@ -115,6 +117,18 @@ function formatLastSeen(value: string) {
     hour: '2-digit',
     minute: '2-digit',
   }).format(date);
+}
+
+function formatBytes(value: number | null) {
+  if (value === null || !Number.isFinite(value)) return '--';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let size = value;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size >= 10 || unit === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
 }
 
 function createWelcomeMessage(): AgentMessage {
@@ -1272,12 +1286,37 @@ function DetailRow({ label, value }: { label: string; value: string }) {
   );
 }
 
+function MetricRow({
+  label,
+  percent,
+  detail,
+}: {
+  label: string;
+  percent: number | null;
+  detail: string;
+}) {
+  const value = percent === null ? 0 : Math.max(0, Math.min(100, percent));
+  return (
+    <View style={styles.metricRow}>
+      <View style={styles.metricHeader}>
+        <Text style={styles.metricLabel}>{label}</Text>
+        <Text style={styles.metricValue}>{percent === null ? '--' : `${percent.toFixed(1)}%`}</Text>
+      </View>
+      <View style={styles.metricTrack}>
+        <View style={[styles.metricFill, { width: `${value}%` as `${number}%` }]} />
+      </View>
+      <Text style={styles.metricDetail}>{detail}</Text>
+    </View>
+  );
+}
+
 function DeviceDetailScreen({
   device,
   refreshing,
   onBack,
   onCapabilities,
   onConfigure,
+  onLoadCapabilities,
   onRefresh,
   onRelease,
 }: {
@@ -1286,13 +1325,50 @@ function DeviceDetailScreen({
   onBack: () => void;
   onCapabilities: () => void;
   onConfigure: () => void;
-  onRefresh: () => void;
+  onLoadCapabilities: () => Promise<DeviceCapability[]>;
+  onRefresh: () => Promise<void>;
   onRelease: () => void;
 }) {
+  const [capabilities, setCapabilities] = useState<DeviceCapability[]>([]);
+  const [capabilityLoading, setCapabilityLoading] = useState(true);
+  const [capabilityError, setCapabilityError] = useState(false);
+  const status = device.systemStatus;
+
+  async function loadCapabilities() {
+    setCapabilityLoading(true);
+    setCapabilityError(false);
+    try {
+      setCapabilities((await onLoadCapabilities()).filter((item) => item.installed));
+    } catch {
+      setCapabilityError(true);
+    } finally {
+      setCapabilityLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void onRefresh();
+    void loadCapabilities();
+  }, [device.id]);
+
+  function capabilitySummary(kind: DeviceCapability['kind']) {
+    if (device.status !== 'online') return '主机离线';
+    if (capabilityLoading) return '读取中';
+    if (capabilityError) return '读取失败';
+    const items = capabilities.filter((item) => item.kind === kind);
+    return items.length
+      ? items.map((item) => `${item.name}${item.local ? '（本地）' : ''}`).join('、')
+      : '未发现';
+  }
+
+  async function refreshDetails() {
+    await Promise.all([onRefresh(), loadCapabilities()]);
+  }
+
   return (
     <View style={styles.fullPage}>
       <PageHeader
-        action={<IconButton disabled={refreshing} icon="refresh" label="刷新状态" onPress={onRefresh} />}
+        action={<IconButton disabled={refreshing} icon="refresh" label="刷新状态" onPress={refreshDetails} />}
         onBack={onBack}
         subtitle={device.status === 'online' ? '在线并可访问' : '当前离线'}
         title={device.name}
@@ -1314,6 +1390,31 @@ function DeviceDetailScreen({
           <DetailRow label="序列号" value={device.serial} />
           <DetailRow label="系统版本" value={device.version} />
           <DetailRow label="最近在线" value={formatLastSeen(device.lastSeenAt)} />
+        </View>
+        <Text style={styles.listSectionTitle}>运行状态</Text>
+        <View style={styles.runtimeSurface}>
+          <View style={styles.runtimeStatusRow}>
+            <View style={device.status === 'online' ? styles.onlineDot : styles.offlineDot} />
+            <Text style={device.status === 'online' ? styles.onlineText : styles.offlineText}>
+              {device.status === 'online' ? '主机在线' : '主机离线'}
+            </Text>
+          </View>
+          <MetricRow label="CPU" percent={device.status === 'online' ? status?.cpuPercent ?? null : null} detail="处理器占用" />
+          <MetricRow
+            detail={`${formatBytes(status?.memoryUsedBytes ?? null)} / ${formatBytes(status?.memoryTotalBytes ?? null)}`}
+            label="内存"
+            percent={device.status === 'online' ? status?.memoryPercent ?? null : null}
+          />
+          <MetricRow
+            detail={`${formatBytes(status?.diskUsedBytes ?? null)} / ${formatBytes(status?.diskTotalBytes ?? null)}`}
+            label="硬盘"
+            percent={device.status === 'online' ? status?.diskPercent ?? null : null}
+          />
+        </View>
+        <Text style={styles.listSectionTitle}>本机能力</Text>
+        <View style={styles.detailSurface}>
+          <DetailRow label="Skill" value={capabilitySummary('skill')} />
+          <DetailRow label="插件" value={capabilitySummary('extension')} />
         </View>
         <Text style={styles.listSectionTitle}>Agent</Text>
         <View style={styles.listSurface}>
@@ -1554,6 +1655,7 @@ function CapabilityScreen({
           <View style={styles.listSurface}>
             {capabilities.map((capability, index) => {
               const updating = capability.installed && capability.installedVersion !== capability.version;
+              const localOnly = capability.local && !capability.managed;
               return (
                 <View key={capability.id} style={[styles.capabilityRow, index < capabilities.length - 1 && styles.rowDivider]}>
                   <View style={styles.capabilityIcon}>
@@ -1562,15 +1664,22 @@ function CapabilityScreen({
                   <View style={styles.capabilityCopy}>
                     <View style={styles.capabilityTitleRow}>
                       <Text numberOfLines={1} style={styles.capabilityTitle}>{capability.name}</Text>
-                      <Text style={[styles.capabilityStatus, capability.installed && styles.capabilityStatusInstalled]}>
-                        {capability.installed ? '已安装' : capability.kind === 'skill' ? 'Skill' : '插件'}
+                      <Text style={[
+                        styles.capabilityStatus,
+                        capability.installed && styles.capabilityStatusInstalled,
+                        localOnly && styles.capabilityStatusLocal,
+                      ]}>
+                        {localOnly ? '本地' : capability.installed ? '已安装' : capability.kind === 'skill' ? 'Skill' : '插件'}
                       </Text>
                     </View>
                     {!!capability.description && <Text style={styles.capabilityDescription}>{capability.description}</Text>}
-                    <Text style={styles.capabilityMeta}>
-                      v{capability.version}{capability.permissions.length ? ` · ${capability.permissions.join(' · ')}` : ''}
-                    </Text>
-                    <View style={styles.capabilityActions}>
+                    {!!(capability.version || capability.permissions.length || localOnly) && (
+                      <Text style={styles.capabilityMeta}>
+                        {capability.version ? `v${capability.version}` : '本地主机'}
+                        {capability.permissions.length ? ` · ${capability.permissions.join(' · ')}` : ''}
+                      </Text>
+                    )}
+                    {!localOnly && <View style={styles.capabilityActions}>
                       <Pressable
                         accessibilityRole="button"
                         disabled={!!busyId || device.status !== 'online' || (!capability.enabled && !capability.installed)}
@@ -1590,7 +1699,7 @@ function CapabilityScreen({
                           </Text>
                         )}
                       </Pressable>
-                    </View>
+                    </View>}
                   </View>
                 </View>
               );
@@ -1858,6 +1967,7 @@ function MainScreen({
         onBack={() => setRoute({ name: 'root' })}
         onCapabilities={() => setRoute({ name: 'capabilities', deviceId: device.id })}
         onConfigure={() => setRoute({ name: 'agent-config', deviceId: device.id })}
+        onLoadCapabilities={() => onLoadCapabilities(device.id)}
         onRefresh={async () => {
           setRefreshing(true);
           try {
@@ -1986,9 +2096,29 @@ function AppContent() {
 
   async function refreshDevice(deviceId: string) {
     if (!session) return;
-    const refreshed = await getDevice(session.token, deviceId);
+    const [refreshed, systemResult] = await Promise.all([
+      getDevice(session.token, deviceId),
+      getDeviceSystemStatus(session.token, deviceId).catch(() => undefined),
+    ]);
     const current = session.devices.find((device) => device.id === deviceId);
-    const merged = current ? { ...current, ...refreshed, name: current.name } : refreshed;
+    const systemStatus: DeviceSystemStatus | undefined = systemResult ?? (
+      refreshed.status === 'offline'
+        ? {
+            online: false,
+            cpuPercent: null,
+            memoryPercent: null,
+            memoryUsedBytes: null,
+            memoryTotalBytes: null,
+            diskPercent: null,
+            diskUsedBytes: null,
+            diskTotalBytes: null,
+            sampledAt: '',
+          }
+        : current?.systemStatus
+    );
+    const merged = current
+      ? { ...current, ...refreshed, name: current.name, systemStatus }
+      : { ...refreshed, systemStatus };
     await updateSession({
       ...session,
       devices: session.devices.map((device) => device.id === deviceId ? merged : device),
@@ -2479,6 +2609,15 @@ const styles = StyleSheet.create({
   detailRow: { alignItems: 'center', borderBottomColor: colors.line, borderBottomWidth: StyleSheet.hairlineWidth, flexDirection: 'row', justifyContent: 'space-between', minHeight: 58, paddingHorizontal: 16, paddingVertical: 10 },
   detailLabel: { color: colors.muted, fontSize: 14 },
   detailValue: { color: colors.ink, flex: 1, fontSize: 14, fontWeight: '600', marginLeft: 22, textAlign: 'right' },
+  runtimeSurface: { backgroundColor: colors.surface, borderColor: colors.line, borderRadius: 8, borderWidth: 1, overflow: 'hidden', paddingBottom: 6 },
+  runtimeStatusRow: { alignItems: 'center', borderBottomColor: colors.line, borderBottomWidth: StyleSheet.hairlineWidth, flexDirection: 'row', minHeight: 48, paddingHorizontal: 16 },
+  metricRow: { paddingHorizontal: 16, paddingTop: 14 },
+  metricHeader: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between' },
+  metricLabel: { color: colors.ink, fontSize: 14, fontWeight: '700' },
+  metricValue: { color: colors.ink, fontSize: 14, fontWeight: '700' },
+  metricTrack: { backgroundColor: colors.background, borderRadius: 3, height: 6, marginTop: 9, overflow: 'hidden' },
+  metricFill: { backgroundColor: colors.accent, borderRadius: 3, height: 6 },
+  metricDetail: { color: colors.subtle, fontSize: 11, marginTop: 6 },
   dangerAction: { alignItems: 'center', borderColor: colors.danger, borderRadius: 8, borderWidth: 1, flexDirection: 'row', height: 52, justifyContent: 'center', marginTop: 24 },
   dangerActionText: { color: colors.danger, fontSize: 15, fontWeight: '700', marginLeft: 8 },
   capabilityWarning: { backgroundColor: colors.warningSoft, borderRadius: 8, color: colors.warning, fontSize: 13, lineHeight: 19, marginBottom: 14, padding: 12 },
@@ -2490,6 +2629,7 @@ const styles = StyleSheet.create({
   capabilityTitle: { color: colors.ink, flex: 1, fontSize: 16, fontWeight: '700', marginRight: 8 },
   capabilityStatus: { backgroundColor: colors.background, borderRadius: 6, color: colors.muted, fontSize: 11, overflow: 'hidden', paddingHorizontal: 7, paddingVertical: 4 },
   capabilityStatusInstalled: { backgroundColor: colors.successSoft, color: colors.success },
+  capabilityStatusLocal: { backgroundColor: colors.warningSoft, color: colors.warning },
   capabilityDescription: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 7 },
   capabilityMeta: { color: colors.subtle, fontSize: 11, lineHeight: 17, marginTop: 6 },
   capabilityActions: { alignItems: 'flex-end', marginTop: 10 },

@@ -215,6 +215,27 @@ class Relay:
         finally:
             connection.pending.pop(request_id, None)
 
+    async def get_system_status(self, device_id: str) -> dict:
+        connection = self._hosts.get(device_id)
+        if not connection:
+            raise HostOffline
+        request_id = str(uuid4())
+        pending = PendingRequest(
+            asyncio.get_running_loop().create_future(), kind="system-status"
+        )
+        connection.pending[request_id] = pending
+        try:
+            try:
+                async with connection.send_lock:
+                    await connection.websocket.send_json(
+                        {"type": "system.status.get", "requestId": request_id}
+                    )
+            except (OSError, RuntimeError) as error:
+                raise HostOffline from error
+            return await asyncio.wait_for(pending.future, timeout=10)
+        finally:
+            connection.pending.pop(request_id, None)
+
     async def capability(
         self,
         device_id: str,
@@ -378,6 +399,31 @@ class Relay:
         ):
             pending.future.set_exception(
                 RuntimeError(str(payload.get("message") or "读取命令目录失败"))
+            )
+        elif (
+            payload.get("type") == "system.status"
+            and pending.kind == "system-status"
+            and not pending.future.done()
+        ):
+            pending.future.set_result(
+                {
+                    "cpuPercent": float(payload.get("cpuPercent") or 0),
+                    "memoryPercent": float(payload.get("memoryPercent") or 0),
+                    "memoryUsedBytes": int(payload.get("memoryUsedBytes") or 0),
+                    "memoryTotalBytes": int(payload.get("memoryTotalBytes") or 0),
+                    "diskPercent": float(payload.get("diskPercent") or 0),
+                    "diskUsedBytes": int(payload.get("diskUsedBytes") or 0),
+                    "diskTotalBytes": int(payload.get("diskTotalBytes") or 0),
+                    "sampledAt": str(payload.get("sampledAt") or ""),
+                }
+            )
+        elif (
+            payload.get("type") == "system.status.error"
+            and pending.kind == "system-status"
+            and not pending.future.done()
+        ):
+            pending.future.set_exception(
+                RuntimeError(str(payload.get("message") or "读取系统状态失败"))
             )
         elif (
             payload.get("type") == "capability.result"

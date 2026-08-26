@@ -20,6 +20,8 @@ from daemon import (
     ProvisioningServer,
     apply_agent_config,
     connect_wifi,
+    cpu_usage_percent,
+    discover_capabilities,
     has_network_connection,
     handle_agent_configuration,
     handle_agent_commands,
@@ -30,6 +32,7 @@ from daemon import (
     load_capability_state,
     load_agent_config,
     message_text,
+    memory_usage,
     refresh_hotspot_networks,
     run_nmcli,
     run_host,
@@ -520,6 +523,7 @@ class ProvisioningTest(unittest.TestCase):
                         root / "agent.json",
                         root / "capabilities.json",
                         root / "skills",
+                        root / "extensions",
                         1,
                     )
                 )
@@ -579,7 +583,7 @@ class ProvisioningTest(unittest.TestCase):
             )
             self.assertEqual(load_agent_config(path), saved)
             if os.name != "nt":
-                self.assertEqual(path.stat().st_mode & 0o777, 0o660)
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             with patch.dict(os.environ, {}, clear=False):
                 apply_agent_config(saved)
                 self.assertEqual(os.environ["ANTHROPIC_API_KEY"], "sk-ant-test")
@@ -590,6 +594,55 @@ class ProvisioningTest(unittest.TestCase):
             with patch.dict(os.environ, {}, clear=False):
                 apply_agent_config(deepseek)
                 self.assertEqual(os.environ["DEEPSEEK_API_KEY"], "sk-deepseek-test")
+
+    def test_calculates_system_usage(self) -> None:
+        before = "cpu 100 0 100 800 0 0 0 0 0 0\n"
+        after = "cpu 150 0 150 900 0 0 0 0 0 0\n"
+        self.assertEqual(cpu_usage_percent(before, after), 50.0)
+        used, total, percent = memory_usage(
+            "MemTotal: 1000 kB\nMemAvailable: 250 kB\n"
+        )
+        self.assertEqual((used, total, percent), (750 * 1024, 1000 * 1024, 75.0))
+
+    def test_discovers_managed_and_local_capabilities(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            skills = root / "skills"
+            extensions = root / "extensions"
+            (skills / "store-skill").mkdir(parents=True)
+            (skills / "store-skill" / "SKILL.md").write_text("# Store", encoding="utf-8")
+            (skills / "local-writer").mkdir()
+            (skills / "local-writer" / "SKILL.md").write_text("# Local", encoding="utf-8")
+            extensions.mkdir()
+            (extensions / "local-tool.ts").write_text("export {};", encoding="utf-8")
+            (extensions / "store-plugin.js").write_text("export {};", encoding="utf-8")
+            state = root / "capabilities.json"
+            state.write_text(
+                json.dumps(
+                    [
+                        {"id": "store-skill", "name": "Store Skill", "kind": "skill"},
+                        {"id": "store-plugin", "name": "Store Plugin", "kind": "extension"},
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            discovered = discover_capabilities(state, skills, extensions)
+
+            self.assertEqual(len(discovered), 4)
+            self.assertEqual(
+                [item["id"] for item in discovered],
+                [
+                    "store-skill",
+                    "store-plugin",
+                    "local-skill:local-writer",
+                    "local-extension:local-tool",
+                ],
+            )
+            self.assertTrue(discovered[0]["managed"])
+            self.assertFalse(discovered[0]["local"])
+            self.assertFalse(discovered[2]["managed"])
+            self.assertTrue(discovered[2]["local"])
 
     def test_applies_relayed_agent_configuration(self) -> None:
         class FakeWebsocket:

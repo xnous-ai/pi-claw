@@ -931,6 +931,45 @@ async def get_agent_commands(
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(error))
 
 
+@app.get("/v1/devices/{device_id}/system-status")
+async def get_device_system_status(
+    device_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    device = owned_device(device_id, user, db)
+    if not relay.is_online(device.id):
+        return {
+            "online": False,
+            "cpuPercent": None,
+            "memoryPercent": None,
+            "memoryUsedBytes": None,
+            "memoryTotalBytes": None,
+            "diskPercent": None,
+            "diskUsedBytes": None,
+            "diskTotalBytes": None,
+            "sampledAt": "",
+        }
+    try:
+        return {"online": True, **await relay.get_system_status(device.id)}
+    except HostOffline:
+        return {
+            "online": False,
+            "cpuPercent": None,
+            "memoryPercent": None,
+            "memoryUsedBytes": None,
+            "memoryTotalBytes": None,
+            "diskPercent": None,
+            "diskUsedBytes": None,
+            "diskTotalBytes": None,
+            "sampledAt": "",
+        }
+    except TimeoutError:
+        raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, "读取主机状态超时")
+    except RuntimeError as error:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(error))
+
+
 async def capability_request(device_id: str, action: str, data: dict | None = None) -> dict:
     try:
         return await relay.capability(device_id, action, data)
@@ -972,15 +1011,22 @@ async def get_device_capabilities(
                 **capability_json(capability),
                 "installed": current is not None,
                 "installedVersion": str(current.get("version", "")) if current else "",
+                "local": bool(current.get("local")) if current else False,
+                "managed": bool(current.get("managed", True)) if current else True,
             }
         )
     for item in installed.values():
+        local = bool(item.get("local"))
         result.append(
             {
                 "id": str(item.get("id", "")),
                 "name": str(item.get("name") or item.get("id") or "已下架能力"),
                 "kind": str(item.get("kind") or "skill"),
-                "description": "该能力已从商店下架，可以继续使用或卸载。",
+                "description": (
+                    "在主机本地发现，未由能力商店管理。"
+                    if local
+                    else "该能力已从商店下架，可以继续使用或卸载。"
+                ),
                 "version": str(item.get("version", "")),
                 "source": "",
                 "permissions": [],
@@ -990,6 +1036,8 @@ async def get_device_capabilities(
                 "updatedAt": "",
                 "installed": True,
                 "installedVersion": str(item.get("version", "")),
+                "local": local,
+                "managed": bool(item.get("managed", True)),
             }
         )
     return result
