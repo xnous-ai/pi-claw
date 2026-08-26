@@ -2,6 +2,10 @@ import { SymbolView, type AndroidSymbol } from 'expo-symbols';
 import { StatusBar as ExpoStatusBar } from 'expo-status-bar';
 import { useEffect, useRef, useState } from 'react';
 import {
+  KeyboardAvoidingView as KeyboardControllerAvoidingView,
+  KeyboardProvider,
+} from 'react-native-keyboard-controller';
+import {
   ActivityIndicator,
   Alert,
   BackHandler,
@@ -1098,7 +1102,7 @@ function ChatScreen({
   }
 
   return (
-    <KeyboardAvoidingView behavior="height" style={styles.fullPage}>
+    <KeyboardControllerAvoidingView automaticOffset behavior="height" style={styles.fullPage}>
       <PageHeader
         onBack={onBack}
         subtitle={`${device.name} · ${device.status === 'online' ? '在线' : '离线'}`}
@@ -1203,7 +1207,7 @@ function ChatScreen({
           <Icon color={colors.surface} name={sending ? 'stop' : 'send'} size={22} />
         </Pressable>
       </View>
-    </KeyboardAvoidingView>
+    </KeyboardControllerAvoidingView>
   );
 }
 
@@ -2282,7 +2286,13 @@ function AppContent() {
 }
 
 export default function App() {
-  return <SafeAreaProvider><AppContent /></SafeAreaProvider>;
+  return (
+    <SafeAreaProvider>
+      <KeyboardProvider>
+        <AppContent />
+      </KeyboardProvider>
+    </SafeAreaProvider>
+  );
 }
 
 const styles = StyleSheet.create({
