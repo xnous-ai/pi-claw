@@ -20,7 +20,7 @@ import urllib.request
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import unquote, urljoin
 from uuid import uuid4
 
 from websockets.asyncio.client import connect
@@ -1359,18 +1359,15 @@ def workspace_file_snapshot(workspace: Path) -> dict[str, tuple[int, int]]:
 
 def collect_generated_attachments(
     workspace: Path,
-    before: dict[str, tuple[int, int]],
     final_text: str,
 ) -> list[dict]:
-    normalized_final_text = final_text.replace("\\", "/")
+    normalized_final_text = unquote(final_text).replace("\\", "/")
     changed: list[tuple[int, Path, int]] = []
     for relative_path, (modified_at, size) in workspace_file_snapshot(workspace).items():
         path = workspace / relative_path
         if path.suffix.lower() not in GENERATED_ATTACHMENT_SUFFIXES:
             continue
         if size <= 0 or size > MAX_ATTACHMENT_BYTES:
-            continue
-        if before.get(relative_path) == (modified_at, size):
             continue
         if path.name not in final_text and relative_path not in normalized_final_text:
             continue
@@ -1448,7 +1445,6 @@ async def handle_chat(
                 for item in attachments
             ],
         }
-        workspace_before = workspace_file_snapshot(agent.workspace)
         print(
             f"收到聊天请求：request={request_id} session={session_id} "
             f"provider={agent.provider or 'default'} model={agent.model or 'default'}",
@@ -1478,7 +1474,6 @@ async def handle_chat(
         final_text = "".join(response_parts)
         generated_attachments = collect_generated_attachments(
             agent.workspace,
-            workspace_before,
             final_text,
         )
         message_id = f"pi-{uuid4()}"

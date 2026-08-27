@@ -48,7 +48,6 @@ from daemon import (
     stop_hotspot,
     sync_conversations,
     wait_for_setup,
-    workspace_file_snapshot,
 )
 
 
@@ -231,7 +230,6 @@ class PiRpcAgentTest(unittest.TestCase):
             workspace = Path(directory)
             unchanged = workspace / "existing.pdf"
             unchanged.write_bytes(b"old")
-            before = workspace_file_snapshot(workspace)
             report = workspace / "report.xlsx"
             report.write_bytes(b"xlsx-content")
             draft = workspace / "draft.pdf"
@@ -243,7 +241,6 @@ class PiRpcAgentTest(unittest.TestCase):
 
             attachments = collect_generated_attachments(
                 workspace,
-                before,
                 "日报已生成，请下载 report.xlsx。",
             )
 
@@ -253,7 +250,21 @@ class PiRpcAgentTest(unittest.TestCase):
                 attachments[0]["mimeType"],
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
-            self.assertEqual(collect_generated_attachments(workspace, before, "处理完成。"), [])
+            self.assertEqual(collect_generated_attachments(workspace, "处理完成。"), [])
+
+    def test_collects_existing_image_referenced_by_final_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            image = workspace / "login qr.png"
+            image.write_bytes(b"png-content")
+
+            attachments = collect_generated_attachments(
+                workspace,
+                "请扫描 /var/lib/clawpi/workspace/login%20qr.png 完成登录。",
+            )
+
+            self.assertEqual([item["name"] for item in attachments], ["login qr.png"])
+            self.assertEqual(attachments[0]["mimeType"], "image/png")
 
     def test_does_not_echo_user_message_when_provider_rejects_key(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
