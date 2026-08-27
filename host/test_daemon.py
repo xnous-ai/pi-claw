@@ -64,6 +64,35 @@ class FakePiAgent(PiRpcAgent):
 
 
 class PiRpcAgentTest(unittest.TestCase):
+    def test_accepts_large_rpc_events(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / "fake_large_event_pi.py"
+            script.write_text(
+                textwrap.dedent(
+                    """
+                    import json
+                    import sys
+
+                    json.loads(sys.stdin.readline())
+                    print(json.dumps({"type": "ignored", "payload": "x" * 1_100_000}), flush=True)
+                    print(json.dumps({
+                        "type": "message_end",
+                        "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}]}
+                    }, ensure_ascii=False), flush=True)
+                    print(json.dumps({"type": "agent_settled"}), flush=True)
+                    sys.stdin.read()
+                    """
+                ),
+                encoding="utf-8",
+            )
+            agent = FakePiAgent(script, root)
+
+            async def collect() -> str:
+                return "".join([part async for part in agent.stream("conversation-1", "start")])
+
+            self.assertEqual(asyncio.run(collect()), "done")
+
     def test_streams_text_and_keeps_conversations_separate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -569,6 +569,9 @@ def tool_status_label(tool_name: str) -> str:
     }.get(tool_name, f"正在使用 {tool_name}")
 
 
+PI_RPC_STREAM_LIMIT = 16 * 1024 * 1024
+
+
 class PiRpcAgent:
     def __init__(
         self,
@@ -627,7 +630,7 @@ class PiRpcAgent:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            limit=1024 * 1024,
+            limit=PI_RPC_STREAM_LIMIT,
         )
         assert process.stdin and process.stdout and process.stderr
         try:
@@ -676,7 +679,7 @@ class PiRpcAgent:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            limit=1024 * 1024,
+            limit=PI_RPC_STREAM_LIMIT,
         )
         assert process.stdin and process.stdout and process.stderr
         try:
@@ -722,7 +725,7 @@ class PiRpcAgent:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            limit=1024 * 1024,
+            limit=PI_RPC_STREAM_LIMIT,
         )
         assert process.stdin and process.stdout and process.stderr
         stderr_task = asyncio.create_task(process.stderr.read())
